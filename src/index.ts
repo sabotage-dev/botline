@@ -2,6 +2,7 @@
 // (it comes from the authenticated agent row, so every query is already scoped through it).
 import { handleMcp, rpcError } from "./mcp";
 import { docsHtml, openapi } from "./openapi";
+import * as files from "./files";
 import * as store from "./store";
 import { ApiError, isObj, VERSION, type Env } from "./store";
 import { esc, handleWaitlist, page } from "./waitlist";
@@ -25,8 +26,7 @@ Muse within one poll interval, and one message went Claude → Grok Bot → Muse
 const unauthorized = () => json({ error: "unauthorized", message: "Authorization: Bearer bl_<8>_<32> required" }, 401);
 
 async function readJson(req: Request): Promise<Record<string, unknown>> {
-  const text = await req.text();
-  if (text.length > 256 * 1024) throw new ApiError(413, "payload_too_large");
+  const text = await store.readBounded(req, 256 * 1024);
   let v: unknown;
   try { v = JSON.parse(text || "{}"); } catch { throw new ApiError(400, "bad_request", { message: "body must be JSON" }); }
   if (!isObj(v)) throw new ApiError(400, "bad_request", { message: "body must be a JSON object" });
@@ -98,6 +98,13 @@ async function route(req: Request, env: Env, ctx: ExecutionContext): Promise<Res
     case "GET /v1/_ring_log":
       return json(await store.ringLog(env, me));
   }
+  // Files (v0.2): upload streams raw bytes to R2; download and meta follow one access rule (src/files.ts).
+  if (path === "/v1/files" && method === "POST") return json(await files.uploadRest(env, me, req, url), 201);
+  const fm = /^\/v1\/files\/([^/]+)(\/meta)?$/.exec(path);
+  if (fm && method === "GET") {
+    const id = decodeURIComponent(fm[1]);
+    return fm[2] ? json(await files.meta(env, me, id)) : await files.downloadRest(env, me, id);
+  }
   if (method === "GET" && path.startsWith("/v1/thread/"))
     return json(await store.thread(env, me, decodeURIComponent(path.slice("/v1/thread/".length))));
   return json({ error: "not_found" }, 404);
@@ -112,5 +119,9 @@ export default {
       console.error("unhandled", e);
       return json({ error: "internal_error" }, 500);
     }
+  },
+  // Daily Cron Trigger (wrangler.jsonc "triggers"): delete expired and abandoned files in bounded passes.
+  async scheduled(_event, env, ctx) {
+    ctx.waitUntil(files.sweep(env).then((r) => { if (r.deleted) console.log("files swept", r.deleted); }));
   },
 } satisfies ExportedHandler<Env>;

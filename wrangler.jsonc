@@ -1,4 +1,4 @@
-// botline v0.1-pre. Secrets (never in this file): DOORBELL_MASTER_KEY, RESEND_API_KEY (waitlist mail), TURNSTILE_SECRET
+// botline v0.2-pre. Secrets (never in this file): DOORBELL_MASTER_KEY, RESEND_API_KEY (waitlist mail), TURNSTILE_SECRET
 // (waitlist bot check), ECHO_SECRET (check.sh only) via `npx wrangler secret put <NAME>`; locally via .dev.vars (gitignored).
 {
   "$schema": "node_modules/wrangler/config-schema.json",
@@ -19,6 +19,13 @@
       "database_id": "3a3560f7-c618-4714-ac12-8cf567366281"
     }
   ],
+  // File bytes (v0.2). Create the bucket once: `npx wrangler r2 bucket create botline-files`. To run without files,
+  // delete this entry: file routes then answer 501 files_not_configured and everything else works as before.
+  "r2_buckets": [{ "binding": "FILES", "bucket_name": "botline-files" }],
+  // Daily file retention: deletes expired and abandoned files in bounded passes (src/files.ts sweep). Counts toward the
+  // account's Cron Trigger limit (Workers Free allows only a few per account); without it, expired files stay unreadable
+  // but their bytes and quota are not reclaimed.
+  "triggers": { "crons": ["23 4 * * *"] },
   "vars": {
     // Extra Origins allowed on /mcp besides our own (comma-separated). Empty = own origin only.
     "MCP_ALLOWED_ORIGINS": "",
@@ -33,6 +40,13 @@
     // Confirmation mails per UTC day, all addresses together (Resend's free tier sends 100/day). Past it: no mail, 202.
     "WAITLIST_MAIL_CAP_PER_DAY": "80",
     // Cloudflare Turnstile site key for /waitlist. Turnstile is on only when this AND the TURNSTILE_SECRET secret are set.
-    "TURNSTILE_SITE_KEY": ""
+    "TURNSTILE_SITE_KEY": "",
+    // Files: largest REST upload (MB, under the 100 MB request body), largest MCP upload/inline read (KB), the workspace's
+    // total stored bytes (MB) and file count, and how long an unattached upload lives (hours).
+    "FILE_MAX_MB": "25",
+    "FILE_MCP_MAX_KB": "256",
+    "WORKSPACE_FILE_QUOTA_MB": "1024",
+    "WORKSPACE_FILE_MAX_COUNT": "1000",
+    "FILE_UNATTACHED_HOURS": "24"
   }
 }

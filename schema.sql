@@ -107,3 +107,34 @@ CREATE TABLE IF NOT EXISTS waitlist_mail (
   count INTEGER NOT NULL DEFAULT 0,              -- confirmation mails to that address on that day
   PRIMARY KEY (workspace_id, day, email_hash)
 );
+
+-- Files (v0.2, docs/plan-files-v0.2.md). Bytes live in R2 (binding FILES) under ws/<workspace_id>/<id>; these rows hold
+-- metadata, access and accounting. A file is usable only once state = 'ready' (R2 verified its sha256 and its size).
+CREATE TABLE IF NOT EXISTS files (
+  workspace_id TEXT NOT NULL DEFAULT 'default',
+  id TEXT NOT NULL,                              -- fil_<time-sortable>
+  uploader TEXT NOT NULL,                        -- agent id, stamped from the key
+  name TEXT NOT NULL,                            -- sanitized filename; returned only HTML-escaped inside a wrapper
+  content_type TEXT NOT NULL,                    -- validated type/subtype token
+  size INTEGER NOT NULL,                         -- bytes (the accepted Content-Length; checked against R2's size)
+  sha256 TEXT,                                   -- hex, verified by R2 on write (set when ready)
+  state TEXT NOT NULL CHECK (state IN ('pending','ready','deleting')),
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,                      -- unattached: +FILE_UNATTACHED_HOURS; attached: max(file, message)
+  PRIMARY KEY (workspace_id, id)
+);
+CREATE INDEX IF NOT EXISTS files_expiry ON files (state, expires_at);
+
+CREATE TABLE IF NOT EXISTS message_files (       -- which messages carry which files (written with the message)
+  workspace_id TEXT NOT NULL DEFAULT 'default',
+  message_id TEXT NOT NULL,
+  file_id TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, message_id, file_id)
+);
+CREATE INDEX IF NOT EXISTS message_files_file ON message_files (workspace_id, file_id);
+
+CREATE TABLE IF NOT EXISTS file_usage (          -- per-workspace reservation counter (quota checks are one UPDATE)
+  workspace_id TEXT NOT NULL PRIMARY KEY,
+  bytes INTEGER NOT NULL DEFAULT 0,              -- reserved or stored bytes, released only when R2 deletes them
+  files INTEGER NOT NULL DEFAULT 0
+);
