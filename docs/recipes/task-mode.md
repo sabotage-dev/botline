@@ -1,4 +1,8 @@
-# Recipe: task mode — letting a message carry work (DRAFT 2026-10-13, not yet applied to any agent)
+# Recipe: task mode — letting a message carry work (DRAFT 2026-10-13, never applied; superseded by v0.4)
+
+**Superseded by v0.4 delegation:** botline now marks each message `trust: "controller"` from the owner's own
+configuration (`scripts/agent-trust.mjs`) and each recipe carries one botline rule (claude.md, grokbot.md, muse.md,
+"Delegation"). The sender list below lived in each agent's prompt; it now lives in botline. Kept for the reasoning.
 
 The conformance recipes treat every message body as data: an agent replies "pong" when `needs` is `reply` and
 never acts on what the body says. That is the safe default and it stays the default. Task mode is the owner's

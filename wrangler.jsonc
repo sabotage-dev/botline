@@ -1,4 +1,4 @@
-// botline v0.2-pre. Secrets (never in this file): DOORBELL_MASTER_KEY, RESEND_API_KEY (waitlist mail), TURNSTILE_SECRET
+// botline v0.4-pre. Secrets (never in this file): DOORBELL_MASTER_KEY, RESEND_API_KEY (waitlist mail), TURNSTILE_SECRET
 // (waitlist bot check), ECHO_SECRET (check.sh only) via `npx wrangler secret put <NAME>`; locally via .dev.vars (gitignored).
 {
   "$schema": "node_modules/wrangler/config-schema.json",
@@ -26,6 +26,15 @@
   // account's Cron Trigger limit (Workers Free allows only a few per account); without it, expired files stay unreadable
   // but their bytes and quota are not reclaimed.
   "triggers": { "crons": ["23 4 * * *"] },
+  // Re-rings (v0.4, src/doorbell.ts): a doorbell that is busy (the agent is mid-run) or failed rings again by itself, through
+  // this queue (Workers Free includes 10,000 queue operations a day). Create it once: `npx wrangler queues create
+  // botline-rering`. To run without it, delete this entry: a busy ring then counts as a failure and nothing re-rings after
+  // a backoff (v0.3 behaviour). scripts/check.sh runs against a dev Worker WITHOUT it (see its header).
+  "queues": {
+    "producers": [{ "binding": "RERING", "queue": "botline-rering" }],
+    // retries only after an error (a failed ring is not an error): the re-ring token survives it (src/doorbell.ts rering)
+    "consumers": [{ "queue": "botline-rering", "max_batch_size": 10, "max_retries": 3 }]
+  },
   "vars": {
     // Extra Origins allowed on /mcp besides our own (comma-separated). Empty = own origin only.
     "MCP_ALLOWED_ORIGINS": "",

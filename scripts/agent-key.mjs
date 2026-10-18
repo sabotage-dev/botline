@@ -5,7 +5,7 @@
 //           To issue a fresh key afterwards, run rotate.
 // A suspected leak: revoke, then rotate. `KEY=$(node scripts/agent-key.mjs rotate claude)` works (notes go to stderr).
 import { createHash, randomBytes } from "node:crypto";
-import { ID_RE, die, parseArgs, q, runQuery, runSql } from "./_d1.mjs";
+import { ID_RE, die, logEvent, parseArgs, q, runQuery, runSql } from "./_d1.mjs";
 
 const { pos, mode } = parseArgs(process.argv.slice(2));
 const [action, id] = pos;
@@ -34,6 +34,7 @@ if (action === "rotate") {
 }
 const check = runQuery(`SELECT key_hash = ${q(hash)} AS ok FROM agents WHERE ${where};`, mode);
 if (!(Array.isArray(check) && check.at(-1)?.results?.[0]?.ok === 1)) die(`${action} of '${id}' did not apply (${mode.slice(2)})`);
+logEvent(id, action === "rotate" ? "key_rotate" : "key_revoke", action === "rotate" ? "by script; previous key valid 10 more minutes" : "by script; no grace", mode);
 if (key) {
   console.error(`agent '${id}' rotated (${mode.slice(2)}); the old key works for 10 more minutes. New key below is shown ONCE:`);
   console.log(key);

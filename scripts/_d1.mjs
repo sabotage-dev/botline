@@ -61,3 +61,17 @@ export function runSql(sql, mode) {
 export function runQuery(sql, mode) {
   return exec([mode, "--command", sql]);
 }
+
+/** Does the table exist? (A database that has not run schema.sql for a version lacks its tables.) */
+export function hasTable(name, mode) {
+  const out = runQuery(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ${q(name)};`, mode);
+  return Array.isArray(out) && out.at(-1)?.results?.length > 0;
+}
+
+/** v0.4 owner-visible event log (agent_events; scripts/activity.mjs). Ids and values only, never a key or a secret.
+ *  Best effort: skipped (with a note) on a database without the table. */
+export function logEvent(agent, kind, detail, mode) {
+  if (!hasTable("agent_events", mode)) return void console.error("note: no agent_events table (run schema.sql for v0.4); event not logged");
+  runSql(`INSERT INTO agent_events (workspace_id, agent_id, at, kind, detail)
+    VALUES ('default', ${q(agent)}, ${q(new Date().toISOString())}, ${q(kind)}, ${q(String(detail).slice(0, 500))});`, mode);
+}

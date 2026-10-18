@@ -106,8 +106,21 @@ waits for Patrick's explicit go, one step at a time. Nothing in this file has be
        `changes` = rev 2; MCP `me` gives tool names; a file call passes the gate (404 for an unknown id); `POST /v1/me/seen`
        with an unknown rev gives 400; `/docs` has the capabilities, files and messages anchors; the waitlist answers 200.
        This session's MCP client still showed the pre-deploy `me` schema (no `seen`): the tool-list lag the plan expects.
-       **Owed (owner):** paste each recipe's capability rule once (Claude routine, Grok Bot, Muse last), answer each
-       agent's files report, watch one Muse poll; then the live check of plan §7.
+       **Owed (owner):** superseded by 3f: the v0.4 botline rule replaces the v0.3 capability rule (each recipe says
+       to replace that paragraph), and grants replace the per-agent files answers.
+   3f. **v0.4 delegation: built 2026-10-18, NOT deployed** (design `docs/plan-delegation-v0.4.md`; council records
+       `docs/council-2026-10-18-deleg-plan.md`, `docs/council-2026-10-18-deleg-diff.md`). Deploy order on the owner's go:
+       1. `scripts/backup.sh`
+       2. `npx wrangler queues create botline-rering`
+       3. `schema.sql --remote` (two new tables)
+       4. `migrate.mjs --remote` (new columns)
+       5. `grant.mjs grant <agent> files --remote` per the owner's choice, before the Worker, so no agent loses files
+       6. `wrangler deploy` with the two `--var` flags
+       7. `agent-trust.mjs delegation on --remote` and `agent-trust.mjs controllers <agent> claude-code --remote`, on the
+          owner's word (without `--remote` the scripts change the LOCAL database; they print which one)
+       8. `npx wrangler secret delete ECHO_SECRET` (set on production since the spike: it exposes the check.sh test routes
+          `/v1/_echo` and `/v1/_rering`; `/v1/_ring_log`, which conformance.mjs reads, does not depend on it)
+       Then the owner pastes each recipe's botline rule once (Grok Bot, the Claude routine, Muse last).
 4. **Recording** (≤ 2 minutes, no audio needed): a terminal running `conformance.mjs --relay` on the left, the three app
    windows on the right; stop when the runner prints `relay closed`. Upload anywhere that gives a plain link; that is
    `{RECORDING_URL}`.

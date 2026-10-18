@@ -1,9 +1,10 @@
 // The `server` block (v0.3; design and council record: docs/plan-capabilities-v0.3.md, docs/council-2026-10-18-caps-plan.md).
 // On every me / inbox response, REST and MCP: what this botline supports for the caller's workspace (`capabilities`, the
 // reference, never hidden), and the changelog entries the calling agent has not recorded as read (`changes`, the nudge).
-// It is computed from deployed code (src/changelog.json), the deployment's bindings and three small tables, so a
-// deploy, a failed run or an agent with no memory all see the same thing. Nothing in it is text from the database or a
-// request. It is reference data, never a permission: what an agent may do stays with its owner's own rule.
+// It is computed from deployed code (src/changelog.json), the deployment's bindings and small tables, so a deploy, a
+// failed run or an agent with no memory all see the same thing. Nothing in it is text from the database or a request.
+// v0.4 (docs/plan-delegation-v0.4.md P4): an optional capability is usable by an agent only when the deployment has it,
+// the workspace has it on AND the owner granted it to that agent (scripts/grant.mjs); `granted` says which.
 import { CAPABILITIES, CHANGELOG, REV, type Capability, type Entry } from "./changelog";
 import { ApiError, now, VERSION, type AgentRow, type Env } from "./store";
 
@@ -38,35 +39,55 @@ async function state(env: Env, ws: string, agent: string): Promise<State | null>
   }
 }
 
+// v0.4 grants fail closed: a database without the agent_capabilities table grants no optional capability.
+const NO_GRANTS = /no such table: agent_capabilities\b/;
+
+/** The optional capabilities the owner granted this agent (scripts/grant.mjs is the only writer). */
+async function grants(env: Env, ws: string, agent: string): Promise<Set<string>> {
+  try {
+    const r = await env.DB.prepare("SELECT capability FROM agent_capabilities WHERE workspace_id = ? AND agent_id = ? AND granted = 1")
+      .bind(ws, agent).all<{ capability: string }>();
+    return new Set(r.results.map((x) => x.capability));
+  } catch (e) {
+    if (NO_GRANTS.test(String(e))) return new Set();
+    throw e;
+  }
+}
+
 /** A core capability is on wherever the deployment has it. An optional one also needs its workspace row (no row = off,
  *  so a new hosted workspace starts default-deny); before the v0.3 tables exist, the ceiling alone decides. */
 const on = (env: Env, st: State | null, c: Capability) =>
   ceiling(env, c.id) && (c.core || st === null || st.enabled.get(c.id) === true);
 
-/** The gate every handler of an optional capability goes through (src/files.ts requireEnabled). */
-export async function hasCapability(env: Env, ws: string, id: string): Promise<boolean> {
+/** The gate every handler of an optional capability goes through (src/files.ts requireEnabled), in order: the deployment
+ *  (unavailable), the workspace (disabled; v0.3's missing-table fallback applies to this layer only), then the agent's
+ *  grant (not_granted; fails closed). */
+export async function capabilityStatus(env: Env, a: AgentRow, id: string): Promise<"ok" | "unavailable" | "disabled" | "not_granted"> {
   const c = CAPABILITIES.find((x) => x.id === id);
-  if (!c || !ceiling(env, id)) return false;
-  if (c.core) return true;
+  if (!c || !ceiling(env, id)) return "unavailable";
+  if (c.core) return "ok";
+  let wsOn = true;
   try {
     const r = await env.DB.prepare("SELECT enabled FROM workspace_capabilities WHERE workspace_id = ? AND capability = ?")
-      .bind(ws, id).first<{ enabled: number }>();
-    return !!r && r.enabled !== 0;
+      .bind(a.workspace_id, id).first<{ enabled: number }>();
+    wsOn = !!r && r.enabled !== 0;
   } catch (e) {
-    if (MISSING.test(String(e))) return true;
-    throw e;
+    if (!MISSING.test(String(e))) throw e;
   }
+  if (!wsOn) return "disabled";
+  return (await grants(env, a.workspace_id, a.id)).has(id) ? "ok" : "not_granted";
 }
 
 const entry = (e: Entry) => ({ rev: e.rev, date: e.date, capability: e.capability, kind: e.kind, summary: e.summary, docs: e.docs });
 
-function block(env: Env, st: State | null, surface: Surface) {
+function block(env: Env, st: State | null, granted: Set<string>, surface: Surface) {
   const caps = CAPABILITIES.filter((c) => on(env, st, c)), ids = new Set(caps.map((c) => c.id));
   return {
     version: VERSION, // for display; never compare it, compare rev
     rev: REV,
     capabilities: caps.map((c) => ({
       id: c.id, summary: c.summary, docs: c.docs, ...(surface === "mcp" ? { mcp_tools: c.mcp_tools } : { rest: c.rest }),
+      granted: c.core || granted.has(c.id), // core is always yours; an optional one only with the owner's grant
     })),
     // Entries of capabilities on for this workspace that this agent has not recorded. Per entry, not one cursor: a
     // capability enabled later shows up then, whatever else the agent recorded in between.
@@ -77,7 +98,8 @@ function block(env: Env, st: State | null, surface: Surface) {
 export type ServerBlock = ReturnType<typeof block>;
 
 export async function serverBlock(env: Env, a: AgentRow, surface: Surface): Promise<ServerBlock> {
-  return block(env, await state(env, a.workspace_id, a.id), surface);
+  const [st, g] = await Promise.all([state(env, a.workspace_id, a.id), grants(env, a.workspace_id, a.id)]);
+  return block(env, st, g, surface);
 }
 
 /** POST /v1/me/seen {revs} and MCP me {seen}: record that the caller read these changelog entries. Scoped to the
@@ -98,5 +120,5 @@ export async function markSeen(env: Env, a: AgentRow, input: unknown, surface: S
       `INSERT OR IGNORE INTO capability_seen (workspace_id, agent_id, rev, seen_at) SELECT ?1, ?2, value, ?3 FROM json_each(?4)`,
     ).bind(a.workspace_id, a.id, now(), JSON.stringify(recorded)).run();
   for (const r of recorded) st.seen.add(r);
-  return { recorded, not_recorded: revs.filter((r) => !recorded.includes(r)), server: block(env, st, surface) };
+  return { recorded, not_recorded: revs.filter((r) => !recorded.includes(r)), server: block(env, st, await grants(env, a.workspace_id, a.id), surface) };
 }

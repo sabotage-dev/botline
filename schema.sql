@@ -1,4 +1,4 @@
--- botline schema (v0.3-pre). Every table carries workspace_id (Phase 1 always 'default').
+-- botline schema (v0.4-pre). Every table carries workspace_id (Phase 1 always 'default').
 -- The full fresh-install definition. Idempotent and non-destructive: safe to re-run against a live database.
 -- An existing database also needs `node scripts/migrate.mjs` (adds columns that CREATE IF NOT EXISTS cannot).
 
@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS agents (
   doorbell_url TEXT,
   doorbell_secret TEXT,                          -- enc:v1:<iv>:<ct> (AES-256-GCM, DOORBELL_MASTER_KEY) or legacy plaintext
   created_at TEXT NOT NULL,
+  controllers TEXT NOT NULL DEFAULT '[]',        -- v0.4: JSON array of agent ids whose messages are tasks for THIS agent
+                                                 -- (only while the workspace has delegation on; scripts/agent-trust.mjs)
   PRIMARY KEY (workspace_id, id)
 );
 
@@ -43,6 +45,8 @@ CREATE TABLE IF NOT EXISTS receipts (
   delivered_at TEXT,                             -- doorbell accepted (2xx)
   read_at TEXT,                                  -- agent fetched it via inbox
   acked_at TEXT,                                 -- agent acked it
+  trust_at_send TEXT,                            -- v0.4: 'controller' if the sender was this recipient's controller at
+                                                 -- send (delegation on, current key); NULL = peer
   PRIMARY KEY (workspace_id, message_id, agent)
 );
 CREATE INDEX IF NOT EXISTS receipts_unread ON receipts (workspace_id, agent, read_at);
@@ -55,6 +59,11 @@ CREATE TABLE IF NOT EXISTS rings (
   last_status TEXT,
   last_at TEXT,
   fail_count INTEGER NOT NULL DEFAULT 0,         -- consecutive failed/timeout/error rings; 5 = dead-lettered until doorbell-set
+  busy_count INTEGER NOT NULL DEFAULT 0,         -- v0.4: consecutive "busy" rings (the endpoint said it is mid-run)
+  rering_at TEXT,                                -- v0.4: when a scheduled re-ring is due (NULL = none pending)
+  rering_gen TEXT,                               -- v0.4: the pending re-ring's token; a queue message with another is stale
+  rering_hour TEXT,                              -- v0.4: the UTC hour rering_count counts in
+  rering_count INTEGER NOT NULL DEFAULT 0,       -- v0.4: automatic re-rings scheduled in rering_hour (capped)
   PRIMARY KEY (workspace_id, agent)
 );
 
@@ -145,7 +154,8 @@ CREATE TABLE IF NOT EXISTS file_usage (          -- per-workspace reservation co
 CREATE TABLE IF NOT EXISTS workspaces (
   id TEXT NOT NULL PRIMARY KEY,
   notices INTEGER NOT NULL DEFAULT 1,            -- 0: server.changes stays empty for this workspace's agents
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  delegation INTEGER NOT NULL DEFAULT 0          -- v0.4: 1 = honour agents.controllers (owner switch; default off everywhere)
 );
 
 CREATE TABLE IF NOT EXISTS workspace_capabilities (
@@ -174,3 +184,25 @@ INSERT OR IGNORE INTO workspace_capabilities (workspace_id, capability, enabled,
   VALUES ('default', 'files', 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 INSERT OR IGNORE INTO capability_seen (workspace_id, agent_id, rev, seen_at)
   SELECT workspace_id, id, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now') FROM agents;
+
+-- Delegation (v0.4, docs/plan-delegation-v0.4.md). Per-agent grants of optional capabilities (no row = not granted;
+-- scripts/grant.mjs is the only writer, and nothing here seeds them), and an owner-visible log of trust, grant and key
+-- changes (scripts/activity.mjs).
+CREATE TABLE IF NOT EXISTS agent_capabilities (
+  workspace_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  capability TEXT NOT NULL,                      -- an optional capability id from src/changelog.json (e.g. files)
+  granted INTEGER NOT NULL,                      -- 1 granted, 0 revoked
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, agent_id, capability)
+);
+
+CREATE TABLE IF NOT EXISTS agent_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  workspace_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,                        -- the agent the event is about
+  at TEXT NOT NULL,
+  kind TEXT NOT NULL,                            -- key_rotate | key_revoke | controllers | delegation | grant | revoke
+  detail TEXT                                    -- ids and values only; never a key or a secret
+);
+CREATE INDEX IF NOT EXISTS agent_events_at ON agent_events (workspace_id, at);

@@ -36,10 +36,15 @@ else if (secret) console.error("warning: DOORBELL_MASTER_KEY is not set; storing
 
 // The UPDATE carries the secret, so it goes through a temp file; the read-back is secret-free and uses
 // --command, which is the only form that returns rows in --remote mode.
+// v0.4: also forget a busy streak, any pending re-ring (its token is cleared, so a queued one arrives stale) and the
+// hour's re-ring budget. Those columns exist only after migrate.mjs, so they are reset only where they exist.
+const v04 = runQuery("SELECT name FROM pragma_table_info('rings') WHERE name = 'busy_count';", mode);
+const busyReset = Array.isArray(v04) && v04.at(-1)?.results?.length
+  ? ", busy_count = 0, rering_at = NULL, rering_gen = NULL, rering_hour = NULL, rering_count = 0" : "";
 runSql(
   `UPDATE agents SET doorbell_kind = ${q(kind)}, doorbell_url = ${q(url)}, doorbell_secret = ${q(secret)}
      WHERE workspace_id = 'default' AND id = ${q(id)};
-   UPDATE rings SET fail_count = 0, lease_until = CASE WHEN in_flight_since IS NULL THEN NULL ELSE lease_until END
+   UPDATE rings SET fail_count = 0, lease_until = CASE WHEN in_flight_since IS NULL THEN NULL ELSE lease_until END${busyReset}
      WHERE workspace_id = 'default' AND agent = ${q(id)};`,
   mode,
 );

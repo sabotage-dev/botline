@@ -7,9 +7,15 @@ import { readFileSync } from "node:fs";
 import { die, parseArgs, runQuery, runSql } from "./_d1.mjs";
 
 const COLUMNS = {
-  agents: { key_hash_prev: "TEXT", prev_valid_until: "TEXT" }, // v0.1: key rotation grace
-  rings: { fail_count: "INTEGER NOT NULL DEFAULT 0" }, // v0.1: doorbell backoff + dead-letter
+  agents: { key_hash_prev: "TEXT", prev_valid_until: "TEXT", controllers: "TEXT NOT NULL DEFAULT '[]'" }, // v0.1 grace; v0.4
+  rings: {
+    fail_count: "INTEGER NOT NULL DEFAULT 0", // v0.1: doorbell backoff + dead-letter
+    busy_count: "INTEGER NOT NULL DEFAULT 0", rering_at: "TEXT", rering_gen: "TEXT", rering_hour: "TEXT", // v0.4: busy and
+    rering_count: "INTEGER NOT NULL DEFAULT 0", //                                                            re-rings
+  },
   ring_log: { detail: "TEXT" }, // v0.1: the reason on error / failed / timeout rows
+  receipts: { trust_at_send: "TEXT" }, // v0.4: the recipient's trust in the sender at send time
+  workspaces: { delegation: "INTEGER NOT NULL DEFAULT 0" }, // v0.4: the owner's delegation switch (table from v0.3 schema.sql)
 };
 
 const { pos, mode } = parseArgs(process.argv.slice(2));

@@ -26,6 +26,16 @@
 #      and the default workspace's notices / files settings and restores them on exit; it adds a second workspace (with
 #      an agent also called muse) and deletes it on exit. Rows 13m-13n rename tables to stand in for an unmigrated or a
 #      broken database, so they run only with --local (skipped otherwise, and the summary line says so).
+#      Run it against a dev Worker WITHOUT the RERING queue (scheduled re-rings are then only recorded, and section 14 fires
+#      them itself with POST /v1/_rering; a real queue would deliver them mid-run). Locally, a config without "queues":
+#        python3 -c "import re; s=open('wrangler.jsonc').read(); open('.wrangler/check.jsonc','w').write(re.sub(r'\n  // Re-rings.*?\n  },', '', s, flags=re.S).replace('\"src/index.ts\"','\"../src/index.ts\"'))"
+#        npx wrangler dev --local --port 8787 --test-scheduled --config .wrangler/check.jsonc --persist-to .wrangler/state
+#      (wrangler reads .dev.vars next to the config: `ln -sf ../.dev.vars .wrangler/.dev.vars`.)
+#      Section 14 switches delegation on and makes agents controllers, so with --remote it runs only when
+#      BOTLINE_REMOTE_DELEGATION_TESTS=1 (skipped otherwise; the summary line says so).
+#      Section 14 (delegation, v0.4) saves delegation and the three agents' controllers and grants and restores them on
+#      exit; it adds a throwaway controller agent and a second workspace and deletes them on exit. Row 14j renames a table
+#      (--local only). Its timing row (14p) uses the echo doorbell's ?delay=, so it needs the ECHO_SECRET routes.
 #      Cleanup failures are printed as `warning: cleanup: …` lines on stderr.
 # Requires curl, jq, python3. Prints a markdown table; exits 1 if any step fails. Never prints a key.
 set -uo pipefail
@@ -43,6 +53,7 @@ MV="io.modelcontextprotocol/protocolVersion"
 RID=""; WLH=() # WLH: sha256 of each check address that may have waitlist_mail ledger rows
 FIDS=(); QB=""; QF="" # FIDS: files this run uploaded (expired on exit); QB/QF: file_usage bytes/files before the quota rows
 SEEN0=""; WSN0=""; WSF0=""; OWS=""; RENAMED="" # section 13: saved capability state, the second workspace, renamed tables
+GR0=""; CTL0=""; DEL0=""; CID=""; OWS2="" # section 12/14: saved grants, controllers, delegation; throwaway agent and workspace
 cleanup() {
   local w=() m
   (cd "$ROOT" && node scripts/doorbell-set.mjs muse none - "$MODE" >/dev/null 2>&1) \
@@ -50,7 +61,7 @@ cleanup() {
   d1 "UPDATE agents SET allowed_senders = '*' WHERE workspace_id = 'default' AND id = 'grokbot'" \
     || w+=("grokbot's allowed_senders was not restored to '*'")
   if [[ -n $RENAMED ]]; then # a 13m/13n table rename did not finish: put the real tables back first
-    for t in workspaces workspace_capabilities capability_seen; do
+    for t in workspaces workspace_capabilities capability_seen agent_capabilities receipts; do
       if [[ $(d1q "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = '${t}_chk'" .n) == 1 ]]; then
         d1 "DROP TABLE IF EXISTS $t" && d1 "ALTER TABLE ${t}_chk RENAME TO $t" || w+=("table ${t}_chk was not renamed back to $t")
       fi
@@ -88,6 +99,26 @@ cleanup() {
   if [[ -n $OWS ]]; then
     for t in "agents WHERE workspace_id" "capability_seen WHERE workspace_id" "workspace_capabilities WHERE workspace_id" "workspaces WHERE id"; do
       d1 "DELETE FROM $t = '$OWS'" || w+=("second-workspace rows were not deleted: DELETE FROM $t = '$OWS'")
+    done
+  fi
+  if [[ -n $GR0 ]]; then
+    d1 "DELETE FROM agent_capabilities WHERE workspace_id = 'default' AND agent_id IN ('claude', 'grokbot', 'muse')" \
+      && d1 "INSERT INTO agent_capabilities (workspace_id, agent_id, capability, granted, updated_at) SELECT 'default', json_extract(value, '\$[0]'), json_extract(value, '\$[1]'), json_extract(value, '\$[2]'), json_extract(value, '\$[3]') FROM json_each('$GR0')" \
+      || w+=("grants of claude, grokbot and muse were not restored")
+  fi
+  if [[ -n $CTL0 ]]; then
+    d1 "UPDATE agents SET controllers = COALESCE((SELECT json_extract(value, '\$[1]') FROM json_each('$CTL0') WHERE json_extract(value, '\$[0]') = agents.id), '[]') WHERE workspace_id = 'default' AND id IN ('claude', 'grokbot', 'muse')" \
+      || w+=("controllers of claude, grokbot and muse were not restored")
+  fi
+  [[ -z $DEL0 ]] || d1 "UPDATE workspaces SET delegation = $DEL0 WHERE id = 'default'" || w+=("delegation was not restored to $DEL0")
+  if [[ -n $CID ]]; then
+    for t in "agents WHERE workspace_id = 'default' AND id" "capability_seen WHERE workspace_id = 'default' AND agent_id" "agent_capabilities WHERE workspace_id = 'default' AND agent_id" "agent_events WHERE workspace_id = 'default' AND agent_id" "rings WHERE workspace_id = 'default' AND agent" "receipts WHERE workspace_id = 'default' AND message_id IN (SELECT id FROM messages WHERE workspace_id = 'default' AND from_agent = '$CID') AND agent" "messages WHERE workspace_id = 'default' AND from_agent"; do
+      d1 "DELETE FROM $t = '$CID'" || w+=("throwaway controller rows were not deleted: DELETE FROM $t = '$CID'")
+    done
+  fi
+  if [[ -n $OWS2 ]]; then
+    for t in "agents WHERE workspace_id" "capability_seen WHERE workspace_id" "receipts WHERE workspace_id" "messages WHERE workspace_id" "ring_log WHERE workspace_id"; do
+      d1 "DELETE FROM $t = '$OWS2'" || w+=("second-workspace rows were not deleted: DELETE FROM $t = '$OWS2'")
     done
   fi
   for m in ${w[@]+"${w[@]}"}; do echo "warning: cleanup: $m" >&2; done
@@ -497,6 +528,12 @@ wx_signup
 row "11p sign up + delete, three times; a fourth signup is capped by the ledger: 202, no row, 3 mails" "202 202 202 / 200 200 200 / 202 0 3" \
   "${sx# } / ${dx# } / $STATUS $(d1q "SELECT COUNT(*) AS n, $(mails "$WX") AS c FROM waitlist WHERE email = '$WX'" '"\(.n) \(.c)"')"
 
+# v0.4: an optional capability needs a per-agent grant (default: none). The file rows below run with files granted to the
+# three agents; their previous grants are restored on exit.
+GR0=$(d1q "SELECT json_group_array(json_array(agent_id, capability, granted, updated_at)) AS a FROM agent_capabilities WHERE workspace_id = 'default' AND agent_id IN ('claude', 'grokbot', 'muse')" .a)
+[[ $GR0 == \[* ]] || { echo "cannot save the agents' grants (run schema.sql for v0.4): stopping before anything is granted" >&2; exit 2; }
+d1 "INSERT INTO agent_capabilities (workspace_id, agent_id, capability, granted, updated_at) VALUES ('default', 'claude', 'files', 1, '$PAST'), ('default', 'grokbot', 'files', 1, '$PAST'), ('default', 'muse', 'files', 1, '$PAST') ON CONFLICT (workspace_id, agent_id, capability) DO UPDATE SET granted = 1"
+
 # 12. Files (v0.2): upload, attach, download, access, limits, MCP, expiry. Bytes in R2, metadata in D1 (src/files.ts).
 FMAX=$(( ${FILE_MAX_MB:-25} * 1024 * 1024 )); FQUOTA=$(( ${WORKSPACE_FILE_QUOTA_MB:-1024} * 1024 * 1024 ))
 # up KEY NAME FILE [extra curl args...] -> STATUS, BODY (raw upload with the file's SHA-256)
@@ -764,10 +801,161 @@ fi
 row "13p agent-add recorded every current entry for the new agent (8a)" "$NENT" \
   "$(d1q "SELECT COUNT(*) AS n FROM capability_seen WHERE workspace_id = 'default' AND agent_id = '$RID'" .n)"
 
-# 14. Table
+# 14. Delegation (v0.4, docs/plan-delegation-v0.4.md): per-recipient trust stamped at send AND checked at read, claimed,
+# peek and by-id reads, reserved meta keys, controller keys, per-agent grants, the busy doorbell and scheduled re-rings,
+# the activity CLI, tenancy. Delegation is switched on here for 'default' and restored on exit.
+D14_NOTE="delegation rows: ran"
+if [[ $MODE == --remote && ${BOTLINE_REMOTE_DELEGATION_TESTS:-} != 1 ]]; then
+  D14_NOTE="delegation rows: skipped (--remote without BOTLINE_REMOTE_DELEGATION_TESTS=1)"; echo "note: $D14_NOTE" >&2
+else
+CTL0=$(d1q "SELECT json_group_array(json_array(id, controllers)) AS a FROM agents WHERE workspace_id = 'default' AND id IN ('claude', 'grokbot', 'muse')" .a)
+DEL0=$(d1q "SELECT delegation FROM workspaces WHERE id = 'default'" .delegation)
+# Never change trust without being able to put it back: stop here if the current state could not be saved.
+[[ $CTL0 == \[* && $DEL0 =~ ^[01]$ ]] || { CTL0=""; DEL0=""; echo "cannot save delegation state: stopping before section 14 changes it" >&2; exit 2; }
+setctl() { d1 "UPDATE agents SET controllers = '$2' WHERE workspace_id = 'default' AND id = '$1'"; }
+setdel() { d1 "UPDATE workspaces SET delegation = $1 WHERE id = 'default'"; }
+snd() { call POST /v1/send "$1" "$2"; MID=$(j .message.id); } # sets MID
+tr_of() { j "[.messages[] | select(.id == \"$1\") | \"\(.trust) \(.claimed)\"] | .[0] // \"missing\""; }
+mtr_of() { tool "[.messages[] | select(.id == \"$1\") | \"\(.trust) \(.claimed)\"] | .[0] // \"missing\""; }
+newkey() { python3 -c 'import secrets, string; a = string.ascii_letters + string.digits; print("bl_" + "".join(secrets.choice(a) for _ in range(8)) + "_" + "".join(secrets.choice(a) for _ in range(32)))'; }
+fut() { python3 -c 'import datetime as d; print((d.datetime.now(d.timezone.utc) + d.timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S.000Z"))'; }
+mrs() { d1q "SELECT fail_count, busy_count, last_status, CASE WHEN lease_until > strftime('%Y-%m-%dT%H:%M:%fZ', 'now') THEN 'lease' ELSE 'free' END AS l, CASE WHEN rering_gen IS NULL THEN 'none' ELSE 'pending' END AS p FROM rings WHERE workspace_id = 'default' AND agent = 'muse'" '"\(.fail_count) \(.busy_count) \(.last_status) \(.l) \(.p)"'; }
+for k in "$KC" "$KG" "$KM"; do call GET '/v1/inbox?unread=1' "$k" ""; done
+(cd "$ROOT" && node scripts/agent-trust.mjs delegation on "$MODE" >/dev/null 2>&1 && node scripts/agent-trust.mjs controllers grokbot claude "$MODE" >/dev/null 2>&1) \
+  && a=script || a=script-failed
+setctl muse '[]'; setctl claude '[]'
+row "14 setup through agent-trust.mjs (delegation on, grokbot's controller claude)" "script 1 [\"claude\"]" "$a $(d1q "SELECT delegation FROM workspaces WHERE id = 'default'" .delegation) $(d1q "SELECT controllers FROM agents WHERE workspace_id = 'default' AND id = 'grokbot'" .controllers)"
+d1 "UPDATE agents SET allowed_senders = '*' WHERE workspace_id = 'default' AND id = 'grokbot'" # section 6 narrowed it; exit restores '*'
+
+snd "$KC" '{"to":["grokbot","muse"],"subject":"14a","body":"a task"}'; M=$MID
+call GET '/v1/inbox?peek=1' "$KG" ""; a=$(tr_of "$M"); call GET '/v1/inbox?unread=1' "$KG" ""; b=$(tr_of "$M")
+call GET '/v1/inbox?unread=1' "$KM" ""; c=$(tr_of "$M")
+row "14a trust per recipient: grokbot (claude is its controller) peek / claim; muse (not) claim" "controller false / controller true / peer true" "$a / $b / $c"
+d1 "INSERT INTO rings (workspace_id, agent, in_flight_since, lease_until, last_status, last_at) VALUES ('default', 'grokbot', '$(fut)', '$(fut)', 'ringing', '$(fut)') ON CONFLICT (workspace_id, agent) DO UPDATE SET in_flight_since = excluded.in_flight_since, lease_until = excluded.lease_until"
+snd "$KC" '{"to":["grokbot"],"subject":"14b","body":"x"}'; M=$MID
+inflight() { d1q "SELECT in_flight_since IS NOT NULL AS f FROM rings WHERE workspace_id = 'default' AND agent = 'grokbot'" .f; }
+call GET '/v1/inbox?peek=1' "$KG" ""; a="$(tr_of "$M") $(inflight)"; call GET '/v1/inbox?unread=1' "$KG" ""; b="$(tr_of "$M") $(inflight)"
+row "14b peek claims nothing and leaves an in-flight lease; the claiming read claims and clears it" "controller false 1 / controller true 0" "$a / $b"
+snd "$KC" '{"to":["grokbot"],"subject":"14c","body":"x"}'; M=$MID
+mt "$KG" inbox_list '{"peek":true}'; a=$(mtr_of "$M"); mt "$KG" thread_get "{\"message_id\":\"$M\"}"; b=$(tool '"\(.message.trust) \(.message.claimed)"')
+mt "$KG" inbox_list '{}'; c=$(mtr_of "$M"); TH=$(tool "[.messages[] | select(.id == \"$M\") | .thread_id][0]")
+call GET "/v1/thread/$TH" "$KG" ""; d=$(tr_of "$M"); mt "$KG" thread_get "{\"thread_id\":\"$TH\"}"; e=$(mtr_of "$M")
+row "14c MCP: inbox_list peek / thread_get message_id / inbox_list claim; REST thread / MCP thread_get thread_id" \
+  "controller false / controller false / controller true / controller false / controller false" "$a / $b / $c / $d / $e"
+call GET '/v1/inbox?peek=true' "$KG" ""; a=$STATUS; call GET '/v1/inbox?peek=yes' "$KG" ""; b="$STATUS $(j .error)"
+mt "$KG" inbox_list '{"peek":"true"}'; c="$(j .result.isError) $(tool .error)"
+row "14c2 peek=true peeks; any other peek value is refused (REST 400, MCP tool error), never read as a claim" "200 400 bad_request true bad_request" "$a $b $c"
+setctl grokbot '[]'; snd "$KC" '{"to":["grokbot"],"subject":"14d before","body":"x"}'; MOLD=$MID
+setctl grokbot '["claude"]'; snd "$KC" '{"to":["grokbot"],"subject":"14d after","body":"x"}'; MNEW=$MID
+byid() { call GET "/v1/message/$1" "$2" ""; j .message.trust; }
+a=$(byid "$MOLD" "$KG"); b=$(byid "$MNEW" "$KG"); setctl grokbot '[]'; c=$(byid "$MNEW" "$KG"); setctl grokbot '["claude"]'
+setdel 0; d=$(byid "$MNEW" "$KG"); setdel 1; e=$(byid "$MNEW" "$KG")
+row "14d nothing granted backwards, revocation immediate: sent before / after the list; removed; delegation off; restored" "peer controller peer peer controller" "$a $b $c $d $e"
+CID="chk-ctl-$(now_ms)"; KCID=$(cd "$ROOT" && node scripts/agent-add.mjs "$CID" "$MODE" 2>/dev/null)
+setctl grokbot "[\"claude\",\"$CID\"]"; KCID2=$(cd "$ROOT" && node scripts/agent-key.mjs rotate "$CID" "$MODE" 2>/dev/null)
+snd "$KCID" '{"to":["grokbot"],"subject":"14e previous key","body":"x"}'; MP=$MID; snd "$KCID2" '{"to":["grokbot"],"subject":"14e current key","body":"x"}'; MCUR=$MID
+a=$(byid "$MP" "$KG"); b=$(byid "$MCUR" "$KG"); call POST /v1/key/rotate "$KCID2" ""; c="$STATUS $(j .error)"
+row "14e a controller's previous key (grace) sends as peer, its current key as controller; its key_rotate is refused" "peer controller 403 rotate_with_script" "$a $b $c"
+b=""; for k in trust trust_at_send claimed owner_approved; do call POST /v1/send "$KM" "{\"to\":[\"grokbot\"],\"subject\":\"x\",\"body\":\"x\",\"meta\":{\"$k\":\"controller\"}}"; b="$b $STATUS"; done
+row "14f meta may not carry trust, trust_at_send, claimed or owner_approved" "400 400 400 400" "${b# }"
+a=""; for v in '*' 'not json' '{"claude":1}'; do setctl grokbot "$v"; snd "$KC" '{"to":["grokbot"],"subject":"14g","body":"x"}'; call GET '/v1/inbox?unread=1' "$KG" ""; a="$a $STATUS $(tr_of "$MID")"; done
+setctl grokbot '["claude"]'
+row "14g a malformed controllers value ('*', not JSON, an object) reads as peer, and the mail still arrives" "200 peer true 200 peer true 200 peer true" "${a# }"
+setctl muse '["grokbot"]'; snd "$KM" '{"to":["grokbot"],"subject":"from a peer","body":"peer text"}'
+snd "$KG" '{"to":["muse"],"subject":"relayed","body":"peer text"}'; a=$(byid "$MID" "$KM"); setctl muse '[]'
+row "14h the hazard the rule forbids: a controller that relays turns a peer's text into a task" "controller" "$a"
+call GET '/v1/inbox?unread=1' "$KG" ""; call GET '/v1/inbox?unread=1' "$KM" ""
+call GET /v1/me "$KCID2" ""; a=$(j '[.server.capabilities[] | "\(.id)=\(.granted)"] | join(",")')
+printf 'x' > "$TMP/g.bin"; up "$KCID2" g.bin "$TMP/g.bin"; b="$STATUS $(j .error)"; call GET '/v1/inbox?unread=1' "$KCID2" ""; c=$STATUS
+(cd "$ROOT" && node scripts/grant.mjs grant "$CID" files "$MODE" >/dev/null 2>&1); up "$KCID2" g.bin "$TMP/g.bin"; d=$STATUS
+GF=$(j .file.id); [[ $GF == fil_* ]] && FIDS+=("$GF"); call GET /v1/me "$KCID2" ""; e=$(j '[.server.capabilities[] | select(.id == "files") | .granted][0]')
+(cd "$ROOT" && node scripts/grant.mjs revoke "$CID" files "$MODE" >/dev/null 2>&1)
+GK="g14-$(now_ms)"; call POST /v1/send "$KCID2" "{\"to\":[\"grokbot\"],\"subject\":\"14i\",\"body\":\"x\",\"attachments\":[\"$GF\"],\"idempotency_key\":\"$GK\"}"
+f="$STATUS $(j .error) $(d1q "SELECT COUNT(*) AS n FROM messages WHERE workspace_id = 'default' AND idempotency_key = '$GK'" .n)"
+mt "$KCID2" file_get "{\"id\":\"$GF\"}"; g=$(tool .error)
+row "14i grants: a new agent has messages only (upload 403, inbox 200); granted: upload 201, granted true; revoked: send with it 403, nothing sent; file_get 403" \
+  "messages=true,files=false 403 capability_not_granted 200 201 true 403 capability_not_granted 0 capability_not_granted" "$a $b $c $d $e $f $g"
+GT_NOTE="grants-table row: skipped (not --local)"
+if [[ $MODE == --local ]]; then
+  GT_NOTE="grants-table row: ran"
+  RENAMED=1; d1 "ALTER TABLE agent_capabilities RENAME TO agent_capabilities_chk"
+  up "$KC" g.bin "$TMP/g.bin"; a="$STATUS $(j .error)"; call GET /v1/me "$KC" ""; b=$(j '[.server.capabilities[] | select(.id == "files") | .granted][0]')
+  d1 "ALTER TABLE agent_capabilities_chk RENAME TO agent_capabilities"; RENAMED=""
+  row "14j no agent_capabilities table: optional capabilities are denied (fail closed)" "403 capability_not_granted false" "$a $b"
+else
+  echo "note: $GT_NOTE" >&2
+fi
+snd "$KC" '{"to":["grokbot"],"subject":"14k","body":"x"}'; M=$MID
+call GET '/v1/inbox?peek=1' "$KG" ""; a=$(tr_of "$M"); call POST /v1/ack "$KG" "{\"id\":\"$M\"}"; b=$STATUS; call GET '/v1/inbox?unread=1' "$KG" ""; c=$(tr_of "$M")
+row "14k peek, ack, then a claiming read: the acked message is not claimed (and run) again" "controller false 200 missing" "$a $b $c"
+snd "$KC" '{"to":["grokbot"],"subject":"14l","body":"x"}'; M=$MID
+call GET '/v1/inbox?unread=0' "$KG" ""; a=$(tr_of "$M"); call GET '/v1/inbox?unread=0' "$KG" ""; b=$(tr_of "$M")
+row "14l unread=0 marks unread mail read: claimed true the first time, false after" "controller true controller false" "$a $b"
+call GET "/v1/message/$M" "$KM" ""; a="$STATUS $(j .error)"
+OWS2="chk-ws2-$(now_ms)"; KO2=$(newkey); KO3=$(newkey)
+d1 "INSERT INTO agents (workspace_id, id, name, key_hash, allowed_senders, doorbell_kind, created_at, controllers) VALUES ('$OWS2', 'grokbot', 'grokbot', '$(printf '%s' "$KO2" | shasum -a 256 | cut -d' ' -f1)', '*', 'none', '$PAST', '[\"claude\"]'), ('$OWS2', 'claude', 'claude', '$(printf '%s' "$KO3" | shasum -a 256 | cut -d' ' -f1)', '*', 'none', '$PAST', '[]')"
+call GET "/v1/message/$M" "$KO2" ""; b="$STATUS"; mt "$KO2" thread_get "{\"message_id\":\"$M\"}"; c=$(tool .error)
+snd "$KO3" '{"to":["grokbot"],"subject":"ws2","body":"x"}'; call GET '/v1/inbox?unread=1' "$KO2" ""; d=$(tr_of "$MID")
+up "$KO2" g.bin "$TMP/g.bin"; e="$STATUS $(j .error)"
+row "14m by-id: a non-party 404; the same id in another workspace 404 (REST, MCP); there, no delegation switch reads peer, no capability" \
+  "404 unknown_message 404 unknown_message peer true 403 capability_disabled" "$a $b $c $d $e"
+# Busy doorbell: muse's doorbell answers 409 (busy) right after muse read mail. Re-rings are recorded (ECHO_SECRET, no
+# Queue here) and fired with POST /v1/_rering.
+(cd "$ROOT" && node scripts/doorbell-set.mjs muse generic_webhook "$BASE/v1/_echo?status=409" "${ECHO_SECRET:-check-secret}" "$MODE" >/dev/null 2>&1)
+d1 "UPDATE rings SET rering_hour = NULL, rering_count = 0 WHERE workspace_id = 'default' AND agent = 'muse'" # sections 9-10 scheduled re-rings this hour
+call GET '/v1/inbox?unread=1' "$KM" ""
+snd "$KC" '{"to":["muse"],"subject":"busy 1","body":"x"}'; sleep 2; a=$(mrs)
+snd "$KC" '{"to":["muse"],"subject":"busy 2","body":"x"}'; sleep 2
+call GET /v1/_ring_log "$KM" ""; b=$(j '.entries[0].status'); call GET /v1/me "$KM" ""; c=$(j .doorbell.state)
+row "14n busy (409 while muse is mid-run): fail_count 0, busy 1, busy lease, re-ring pending; a second send coalesces; me says busy" "0 1 busy lease pending coalesced busy" "$a $b $c"
+d1 "UPDATE agents SET doorbell_url = '$BASE/v1/_echo' WHERE workspace_id = 'default' AND id = 'muse'"
+call GET /v1/_echo/hits "$KC" ""; E0=$(j .count)
+call POST /v1/_rering "$KM" '{"gen":"stale-token"}'; a=$(j .result)
+call POST /v1/_rering "$KM" '{}'; a="$a $(j .result) $(mrs | cut -d' ' -f4-)" # early: the busy lease is still live
+d1 "UPDATE rings SET lease_until = '$PAST' WHERE workspace_id = 'default' AND agent = 'muse'"
+if [[ $MODE == --local ]]; then # an error after the token check (no receipts table) keeps the token and frees the lease
+  RENAMED=1; d1 "ALTER TABLE receipts RENAME TO receipts_chk"; call POST /v1/_rering "$KM" '{}'; f="$STATUS $(mrs | cut -d' ' -f4-)"
+  d1 "ALTER TABLE receipts_chk RENAME TO receipts"; RENAMED=""
+  row "14o2 a re-ring that hits an error after its token check keeps the token and frees the lease (the Queue retries)" "500 free pending" "$f"
+fi
+call POST /v1/_rering "$KM" '{}'; b=$(j .result); sleep 1
+call GET /v1/_echo/hits "$KC" ""; c=$(( $(j .count) - E0 )); call GET /v1/_ring_log "$KM" ""; d="$(j '.entries[0].status') $(j '.entries[0].message_ids | fromjson | length')"
+row "14o recovery: a stale token does nothing; a re-ring that arrives early is rescheduled (nothing rung); after the lease, one ring lists both messages; busy reset" \
+  "stale rang lease pending rang 1 ok 2 0 0 ok lease none" "$a $b $c $d $(mrs)"
+call GET '/v1/inbox?unread=1' "$KM" ""
+d1 "UPDATE rings SET busy_count = 0, rering_gen = NULL, rering_at = NULL, fail_count = 0, rering_hour = NULL, rering_count = 0 WHERE workspace_id = 'default' AND agent = 'muse'"
+d1 "UPDATE agents SET doorbell_url = '$BASE/v1/_echo?status=409&delay=4000' WHERE workspace_id = 'default' AND id = 'muse'"
+rl() { call GET /v1/_ring_log "$KM" ""; j '.ring | "\(if .in_flight then "in_flight" else "cleared" end) \(.busy_count)"'; }
+snd "$KC" '{"to":["muse"],"subject":"race 1","body":"x"}'; sleep 1
+call GET '/v1/inbox?unread=1' "$KM" ""; snd "$KC" '{"to":["muse"],"subject":"race 2","body":"x"}'; sleep 3.4; a=$(rl); sleep 2.5; b=$(rl)
+row "14p a busy result from an older ring never touches a newer ring's claim (guarded write): ring 2 still in flight, then busy" "in_flight 0 cleared 1" "$a $b"
+call GET '/v1/inbox?unread=1' "$KM" ""
+d1 "UPDATE agents SET doorbell_url = '$BASE/v1/_echo?status=409' WHERE workspace_id = 'default' AND id = 'muse'"
+d1 "UPDATE rings SET busy_count = 3, rering_gen = NULL, rering_at = NULL, lease_until = NULL, in_flight_since = NULL, fail_count = 0, rering_hour = NULL, rering_count = 0 WHERE workspace_id = 'default' AND agent = 'muse'"
+snd "$KC" '{"to":["muse"],"subject":"busy 4","body":"x"}'; sleep 2; a=$(mrs)
+row "14q the 4th busy result is an ordinary failure: fail_count 1, backoff, a re-ring scheduled for when the backoff ends" "1 3 failed lease pending" "$a"
+d1 "UPDATE agents SET doorbell_url = '$BASE/v1/_echo' WHERE workspace_id = 'default' AND id = 'muse'"
+d1 "UPDATE rings SET lease_until = '$PAST' WHERE workspace_id = 'default' AND agent = 'muse'"
+call POST /v1/_rering "$KM" '{}'; a=$(j .result); sleep 1
+row "14r after the backoff the scheduled re-ring rings by itself (no new send): ok, fail_count and busy_count 0" "rang 0 0 ok lease none" "$a $(mrs)"
+call GET '/v1/inbox?unread=1' "$KM" ""
+d1 "UPDATE agents SET doorbell_url = '$BASE/v1/_echo?status=409' WHERE workspace_id = 'default' AND id = 'muse'"
+d1 "UPDATE rings SET busy_count = 0, fail_count = 0, rering_gen = NULL, lease_until = NULL, in_flight_since = NULL, rering_hour = '$(date -u +%Y-%m-%dT%H)', rering_count = 6 WHERE workspace_id = 'default' AND agent = 'muse'"
+snd "$KC" '{"to":["muse"],"subject":"capped","body":"x"}'; sleep 2
+call GET /v1/_ring_log "$KM" ""; a=$(j '[.entries[0:2][] | .status] | join(",")')
+row "14s past 6 automatic re-rings this hour: none is scheduled (rering_capped) and the busy lease is dropped so the next send rings" "rering_capped,busy 0 1 busy free none" "$a $(mrs)"
+call GET '/v1/inbox?unread=1' "$KM" ""
+(cd "$ROOT" && node scripts/doorbell-set.mjs muse generic_webhook "$BASE/v1/_echo" "${ECHO_SECRET:-check-secret}" "$MODE" >/dev/null 2>&1)
+ACT=$(cd "$ROOT" && node scripts/activity.mjs --since 1h --limit 40 "$MODE" 2>/dev/null); ACTB=$(cd "$ROOT" && node scripts/activity.mjs --since 1h --limit 40 --bodies "$MODE" 2>/dev/null)
+row "14t activity.mjs: no key material; bodies only with --bodies, inside the wrapper; the trust change is logged" "no-keys no-bodies wrapped logged" \
+  "$(grep -qE 'bl_[A-Za-z0-9]{8}_|key_hash|doorbell_secret' <<<"$ACT$ACTB" && echo keys || echo no-keys) $(grep -qF 'peer text' <<<"$ACT" && echo bodies || echo no-bodies) $(grep -qF 'field="body">peer text' <<<"$ACTB" && echo wrapped || echo unwrapped) $(grep -qE "key_rotate|controllers" <<<"$ACT" && echo logged || echo missing)"
+
+fi # section 14 gate
+
+# 15. Table
 echo "| step | expected | actual | result |"
 echo "|---|---|---|---|"
 printf '%s\n' "${ROWS[@]}"
 echo
-echo "steps: ${#ROWS[@]}  failed: $FAILS  base: $BASE  $TS_NOTE  $NF_NOTE  $SW_NOTE  $UM_NOTE  at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "steps: ${#ROWS[@]}  failed: $FAILS  base: $BASE  $TS_NOTE  $NF_NOTE  $SW_NOTE  $UM_NOTE  $GT_NOTE  ${D14_NOTE:-}  at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 [[ $FAILS -eq 0 ]]

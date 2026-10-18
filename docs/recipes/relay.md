@@ -98,3 +98,6 @@ The plan asks for two loops: repeat with `relay 2` / `relay test 2` / `relay-sta
 - `relay_to` shrinks by one id per hop, so a chain always ends; past hop 8 botline still delivers but rings nobody,
   so a long chain stalls at the first agent that is only woken by its doorbell.
 - The idempotency key makes a routine that runs twice on the same message forward it once.
+- **Never on a controller (v0.4).** A relayed copy is marked with the relayer's `trust`. If the relaying agent is a
+  controller for the next agent, any agent's text arrives there as a task. Keep the relay rule off every agent that is on
+  a controller list (`scripts/agent-trust.mjs show`).
