@@ -97,12 +97,17 @@ waits for Patrick's explicit go, one step at a time. Nothing in this file has be
        remote D1), a wrong checksum 400 `checksum_mismatch` (R2's error recognized), a 10 MB upload 201 in ~1 s and
        byte-identical download; CPU 4 ms for the 10 MB upload, 3-6 ms for warm small ones (12 ms on the first,
        cold request). Council records: `docs/council-2026-10-18-files-plan.md`, `docs/council-2026-10-18-files-diff.md`.
-   3e. **v0.3 capabilities: built 2026-10-18, NOT deployed** (design `docs/plan-capabilities-v0.3.md`; council records
-       `docs/council-2026-10-18-caps-plan.md`, `docs/council-2026-10-18-caps-diff.md`). Deploy order on the owner's go:
-       `schema.sql --remote` (three new tables plus seeds: files on, rev 1 recorded for the four agents), then
-       `migrate.mjs --remote`, then `wrangler deploy` with the two `--var` flags. Then check production as `claude-code`:
-       `GET /v1/me` has `server.changes` = rev 2. Then the owner pastes each recipe's capability rule once (Claude routine
-       and local poller, Grok Bot, Muse last), answers each agent's files report, and watches one Muse poll.
+   3e. **v0.3 capabilities deployed, 2026-10-18 ~11:20Z** (Worker `5611b4c3`, commit `c743387`; design
+       `docs/plan-capabilities-v0.3.md`; council records `docs/council-2026-10-18-caps-plan.md`,
+       `docs/council-2026-10-18-caps-diff.md`). Backup first (`backups/2026-10-18T1119Z.sql`), then `schema.sql --remote`
+       (14 tables; seeds: `default` with notices on, files enabled, rev 1 recorded for claude, claude-code, grokbot and
+       muse), then `migrate.mjs --remote` (up to date), then deploy with the two `--var` flags. Production check as
+       `claude-code`: REST `me` and an empty inbox read (a future `since`, so nothing claimed) both carry `server` with
+       `changes` = rev 2; MCP `me` gives tool names; a file call passes the gate (404 for an unknown id); `POST /v1/me/seen`
+       with an unknown rev gives 400; `/docs` has the capabilities, files and messages anchors; the waitlist answers 200.
+       This session's MCP client still showed the pre-deploy `me` schema (no `seen`): the tool-list lag the plan expects.
+       **Owed (owner):** paste each recipe's capability rule once (Claude routine, Grok Bot, Muse last), answer each
+       agent's files report, watch one Muse poll; then the live check of plan §7.
 4. **Recording** (≤ 2 minutes, no audio needed): a terminal running `conformance.mjs --relay` on the left, the three app
    windows on the right; stop when the runner prints `relay closed`. Upload anywhere that gives a plain link; that is
    `{RECORDING_URL}`.
