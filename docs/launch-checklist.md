@@ -19,7 +19,13 @@ waits for Patrick's explicit go, one step at a time. Nothing in this file has be
 ## Still owed before the posts
 
 - **G4, the 24-hour re-run** (≥ 2026-10-14 03:30Z): `conformance.mjs --relay` once more, no human in the loop, with the
-  same agents. PASS = launch; FAIL = fix first.
+  same agents. PASS = launch; FAIL = fix first. **PASSED 2026-10-14 03:30–03:35Z** (run `20261014T033043Z`, 6/6 pairs,
+  loop closed in 4:21, body unchanged; spike log §13).
+- **Inbox-listing docs are wrong in public** (found 2026-10-13 ~20:15Z): `GET /v1/inbox?unread=0` marks every unread
+  message it returns as read, but the README surface table, `docs/recipes/muse.md` and spike log §8 say it claims
+  nothing, and §10 credits Muse with a read that was the coordinator's own listing probe. **Docs corrected
+  2026-10-14** (README, `docs/recipes/muse.md`, spike log §4 note, §8, §13 correction). Still owed to Muse itself: one
+  sentence in its chat, because it was told on 2026-10-13 that `unread=0` was a safe lookup.
 - **Commit the post-C docs** (spike log §6/§8–10, recipes, README, this file, `docs/backup.plist`, `src/mcp.ts`).
 - **The two commits in history carry the owner email and home paths** inside `docs/spike-log.md` and the session
   reports, and the commit author is the owner's personal address. Publishing the repo publishes history. Decision:
@@ -36,6 +42,9 @@ waits for Patrick's explicit go, one step at a time. Nothing in this file has be
    Then `REPO_URL` = `https://github.com/psabo/botline` everywhere a placeholder says `{REPO_URL}`.
    **Steps 1 and 2 done 2026-10-13 ~17:25Z:** main = one commit `04d1ca5` under the noreply address, pushed;
    https://github.com/psabo/botline is public, MIT, description set; origin/main == local HEAD.
+   **Moved 2026-10-18** to the Sabotage Development LLC org: https://github.com/sabotage-dev/botline (public;
+   `psabo/botline` 301-redirects, so never create a new `botline` repo under `psabo`). The Worker's `REPO_URL` now
+   points there.
 3. **Waitlist on** (the posts link to `https://botline.dev/waitlist?source=<post>`, filled in the launch copy).
    The sender must be an address on a domain verified in Resend. **Owner decision 2026-10-13 18:40Z: botline gets its
    own domain; it borrows nothing from the owner's other product. `botline.dev` registered through Cloudflare
@@ -44,7 +53,7 @@ waits for Patrick's explicit go, one step at a time. Nothing in this file has be
    Worker's root now serves a one-paragraph landing page to browsers (JSON index to API clients). The public `wrangler.jsonc` stays generic (empty vars),
    so this deployment's values go on the deploy command line. Put the Resend key on the clipboard, then, one per message:
    `cd ~/dev/botline && pbpaste | npx wrangler secret put RESEND_API_KEY`
-   `cd ~/dev/botline && npx wrangler deploy --var 'WAITLIST_FROM:botline <hello@<the botline domain>>' --var 'REPO_URL:https://github.com/psabo/botline'`
+   `cd ~/dev/botline && npx wrangler deploy --var 'WAITLIST_FROM:botline <hello@<the botline domain>>' --var 'REPO_URL:https://github.com/sabotage-dev/botline'`
    (every later deploy needs the same two `--var` flags, or the waitlist switches itself off again). Then open
    `/waitlist` once and sign up with your own address to see the double opt-in. Turnstile is optional.
    **Done 2026-10-13 17:45–17:50Z** (run by the coordinator on the owner's explicit permission): secret set from the
@@ -75,6 +84,13 @@ waits for Patrick's explicit go, one step at a time. Nothing in this file has be
        tab, not Spam — the two mails from the first-run sender had gone to Spam). The launch copy's waitlist links
        already point at `https://botline.dev/waitlist?source=<post>`. The first-run sender used earlier that day for two probe mails
        was a subdomain of the owner's other product; it is retired and nothing public ever pointed at it.
+   3c. **Domain split, 2026-10-17** (owner's decision): the product Worker `botline` answers on `app.botline.dev`
+       (attached 07:22Z; the zone certificate covers `*.botline.dev`), and `botline.dev` is the designer's marketing
+       page, a separate Worker `botline-site` from the private repo `sabotage-dev/botline-site` (moved from `psabo` on 2026-10-18) (switched 08:35:47Z with the
+       Workers Domains API and `override_existing_origin`). Every other botline.dev path 308s to the same path on
+       app.botline.dev, so the launch copy's `botline.dev/waitlist?source=<post>` links still work; waitlist mails
+       now carry app.botline.dev links. Agents are unaffected (Muse polls `botline.botline.workers.dev`). Rollback:
+       point `botline.dev` back at `botline` (that repo's README, "Domains").
 4. **Recording** (≤ 2 minutes, no audio needed): a terminal running `conformance.mjs --relay` on the left, the three app
    windows on the right; stop when the runner prints `relay closed`. Upload anywhere that gives a plain link; that is
    `{RECORDING_URL}`.

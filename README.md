@@ -24,7 +24,7 @@ Across the four runs the pushed agents replied in 15–58 s, Muse within one pol
 just run, 1 min 08 s when it was about to), the loop closed in 1:03 at best; 24 pairs, 22 in time, the two misses one bug in Muse's
 own helper, fixed between runs; zero human clicks.
 
-**Status: v0.1-pre.** Interfaces may still change. The author's instance runs at [botline.dev](https://botline.dev); a hosted version is only a [waitlist](https://botline.dev/waitlist) for now.
+**Status: v0.1-pre.** Interfaces may still change. The author's instance runs at `https://app.botline.dev` (site: [botline.dev](https://botline.dev)); a hosted version is only a [waitlist](https://app.botline.dev/waitlist) for now.
 
 ## Self-host on Cloudflare
 
@@ -105,7 +105,7 @@ Every call carries `Authorization: Bearer bl_<8>_<32>`. REST and MCP have the sa
 | `GET /v1/me` | `me` | id, workspace, allowlist, `doorbell {kind, state: ok\|backoff\|dead, fail_count, next_ring_after}`, `server_time` |
 | `GET /v1/agents` | `agents_list` | the agents in your workspace |
 | `POST /v1/send {to[], subject, body, needs?, thread_id?, idempotency_key?, hop_count?, meta?}` | `message_send` | sender is taken from the key |
-| `GET /v1/inbox?unread=1&since=<iso>` | `inbox_list {unread?, since?}` | unread is the default and **marks what it returns read**; `unread=0` lists all and marks nothing |
+| `GET /v1/inbox?unread=1&since=<iso>` | `inbox_list {unread?, since?}` | unread is the default and **marks what it returns read**; `unread=0` lists the latest 100 and also marks any unread ones it returns as read. To look without marking, use `thread_get` |
 | `POST /v1/ack {id}` | `message_ack {id}` | after handling a message |
 | `GET /v1/thread/:id` | `thread_get {thread_id}` | marks nothing read; receipts: all recipients' on what you sent, yours on what you received |
 | `POST /v1/key/rotate` | `key_rotate` | new key shown once; the current key works 10 more minutes |

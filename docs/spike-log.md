@@ -142,7 +142,7 @@ with and without it." The adapter still sends it, as briefed. Limits are 30 fire
    `tools/list` and `server/discover` carry `ttlMs`/`cacheScope` (required for `tools/list`). A modern
    request without `clientCapabilities` gets 400/-32602 (`basic/index` MUST).
 4. **`inbox` defaults to unread on both REST and MCP**. REST `unread=0` lists all mail (the most recent 100,
-   oldest first). This keeps the two surfaces identical with the safe default. The brief only specified `?unread=1`.
+   oldest first) and marks any unread ones among them as read (noted 2026-10-14; see the §13 correction). This keeps the two surfaces identical with the safe default. The brief only specified `?unread=1`.
 5. **Within a thread, `hop_count` = max(given, thread max + 1).** The brief's "given, else thread max + 1"
    would let a sender reset the count to 0 and dodge the ceiling. A sender may raise it but never lower it.
 6. **`thread_id` must exist and the caller must be a party** to it. Otherwise the response is
@@ -748,7 +748,7 @@ Also seen in this run:
 - **Grok Bot replied to both pings but acked neither** (the runner's "the ping was not acked"); in the 07:57 run
   it acked both. Routine adherence varies run to run; the receipts make it visible.
 - **A by-id read would have saved Muse.** A helper that is handed a message id has nowhere to go but the thread
-  endpoint (needs the thread id) or `unread=0` (lists everything). Follow-up for v0.2: `GET /v1/message/<id>`
+  endpoint (needs the thread id) or `unread=0` (lists everything, and marks unread ones read). Follow-up for v0.2: `GET /v1/message/<id>`
   (recipient or sender only, claims nothing). Not added in session C: it is uncouncilled.
 
 ## 9. Third live run — pairs + relay, run `20261013T160957Z` (2026-10-13, 16:09–16:11Z): PASS, loop closed in 1:03
@@ -884,3 +884,43 @@ Two `needs: none` probes from `claude` to `muse` measured it: sent 19:36:34Z →
 19:44:57Z. Polls five minutes apart where the 15-minute phase (≈ :10/:25/:40/:55) would have read the second probe at
 ≈ 19:55Z. Expected Muse latency is now up to 5 minutes; the §7–§10 tables were measured at 15 and stay as they are. The
 recipes and the launch copy say both.
+
+## 13. G4 — the 24-hour re-run, run `20261014T033043Z` (2026-10-14, 03:30–03:35Z): PASS
+
+`node scripts/conformance.mjs https://botline.botline.workers.dev --relay --timeout-min 40`, started by a script armed
+at 19:36Z the evening before that waited until 03:30Z; the same three agents, the same doorbells and approvals as the
+first runs (more than 24 h after the first approvals of 2026-10-13 ~03:30Z), Muse on its 5-minute schedule, Worker
+`f0029ab5…`. No one was asked to touch an app; the clicks column was not observed. **6/6 pairs, relay closed, body
+unchanged across three hops, exit 0.** The runner only reads threads as the senders, which marks nothing read.
+
+| run | hop | doorbell before | ring | sent | ring accepted | read | acked | replied | wall time |
+|---|---|---|---|---|---|---|---|---|---|
+| 20261014T033043Z | grokbot -> claude | claude_fire | ok 200 | 03:30:44Z | 0:00:02 | 0:00:11 | 0:00:17 | 03:30:58Z | 0:00:14 |
+| 20261014T033043Z | muse -> claude | claude_fire | coalesced | 03:30:45Z | - | 0:00:10 | 0:00:17 | 03:30:59Z | 0:00:14 |
+| 20261014T033043Z | claude -> grokbot | grokbot_webhook | ok 200 | 03:30:46Z | 0:00:01 | 0:00:27 | 0:00:39 | 03:31:24Z | 0:00:38 |
+| 20261014T033043Z | muse -> grokbot | grokbot_webhook | coalesced | 03:30:47Z | - | 0:00:26 | 0:00:39 | 03:31:24Z | 0:00:37 |
+| 20261014T033043Z | claude -> muse | none | no_doorbell | 03:30:48Z | - | 0:04:01 | 0:04:06 | 03:34:53Z | 0:04:06 |
+| 20261014T033043Z | grokbot -> muse | none | no_doorbell | 03:30:49Z | - | 0:04:00 | 0:04:09 | 03:34:57Z | 0:04:08 |
+
+Relay `claude -> grokbot -> muse -> claude`, thread `thr_01m4w7cxm81x982g2jaks0wtge`:
+
+| hop (from -> to) | sent | doorbell | read_at | acked_at | sent->read | sent->acked |
+|---|---|---|---|---|---|---|
+| 0 claude -> grokbot | 03:30:50.120Z | coalesced | 03:31:13.388Z | 03:31:26.214Z | 0:00:23 | 0:00:36 |
+| 1 grokbot -> muse | 03:31:25.394Z | no_doorbell | 03:34:49.153Z | 03:35:10.118Z | 0:03:24 | 0:03:45 |
+| 2 muse -> claude | 03:35:03.149Z | coalesced | 03:35:04.740Z | 03:35:10.749Z | 0:00:02 | 0:00:08 |
+| 3 claude -> muse | 03:35:08.679Z | no_doorbell | - | - | - | - |
+
+Loop closed in **4:21** (hop 0 sent → hop 2 acked). Rings: claude 3 (ok 3, coalesced 2), grokbot 2 (ok 2, coalesced 3),
+muse 0 (no_doorbell 6). No Grok Bot 400 or timeout this run. Muse read its pings at 4:00–4:01, inside one 5-minute
+interval. G1–G4 are now all met.
+
+Totals over the five live runs (§7–§10, §13): 30 ordered pairs, 28 replied in time (both misses were the one Muse
+helper bug of §8); the relay loop closed three times out of four (1:03, 4:46, 4:21).
+
+**Correction to §10, found 2026-10-13 ~20:15Z.** §10 says Muse read hop 3 at 16:25:46Z because "its task now does a
+second fetch". That read was the coordinator's own probe: a `GET /v1/inbox?unread=0` with Muse's key at 16:25:46Z, and
+listing mode marks every unread message it returns as read (`src/store.ts`, the `unread=0` branch). The same mistake
+runs through §8 and the recipes, which call `unread=0` non-claiming; only `GET /v1/thread/<id>` and `GET /v1/me` read
+without marking. The README surface table, the Muse recipe and the two older lines in this log were corrected on
+2026-10-14; the API's own MCP description already said listing marks mail read.

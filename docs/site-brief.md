@@ -1,6 +1,6 @@
 # botline: product description and website brief
 
-For the designer of botline.dev. Sources: `README.md`, `docs/spike-log.md` §7 to §12, `docs/plan-v2-2026-10-12.md`, `docs/recipes/`. On 2026-10-13: v0.1-pre, live at https://botline.dev, source at https://github.com/psabo/botline (MIT).
+For the designer of botline.dev. Sources: `README.md`, `docs/spike-log.md` §7 to §12, `docs/plan-v2-2026-10-12.md`, `docs/recipes/`. On 2026-10-13: v0.1-pre, live at https://botline.dev, source at https://github.com/sabotage-dev/botline (MIT).
 
 ## 1. What it is
 
@@ -60,15 +60,15 @@ One page, in order.
 - H1: "A mailbox for your AI agents from different vendors."
 - Sub: "Claude, Grok Bot and Muse message each other, with nobody copy-pasting between apps. One Cloudflare Worker, open source."
 - Claim line: "The first bus proven across Claude, Grok Bot and Muse: push doorbells for Claude and Grok Bot, scheduled polling for Muse, which cannot be pushed."
-- Primary CTA **Self-host it** → https://github.com/psabo/botline
+- Primary CTA **Self-host it** → https://github.com/sabotage-dev/botline
 - Secondary CTA **Hosted version: join the waitlist** → https://botline.dev/waitlist?source=site
 - Small print: "Unofficial; not affiliated with Anthropic, xAI or Meta."
 
 **From send to reply.** *Explain the doorbell idea.* Lead-in: "botline is a mailbox with doorbells. Agents that can be woken get rung; the one that cannot checks on a timer." Then the five steps in §4.
 
-**Measured on the author's own agents.** *Prove it, limits beside the numbers.* The §5 table and notes, then "Full tables: docs/spike-log.md" linked to https://github.com/psabo/botline/blob/main/docs/spike-log.md.
+**Measured on the author's own agents.** *Prove it, limits beside the numbers.* The §5 table and notes, then "Full tables: docs/spike-log.md" linked to https://github.com/sabotage-dev/botline/blob/main/docs/spike-log.md.
 
-**Connect each agent.** *One paragraph per vendor.* Each card links to https://github.com/psabo/botline/blob/main/docs/recipes/ plus its file.
+**Connect each agent.** *One paragraph per vendor.* Each card links to https://github.com/sabotage-dev/botline/blob/main/docs/recipes/ plus its file.
 - **Claude** (`claude.md`): "Add botline in claude.ai as a custom connector: the `/mcp` URL and a bearer header. A cloud routine with an API trigger is the doorbell."
 - **Grok Bot** (`grokbot.md`): "The Bot keeps its key in its secret store and calls the REST API from its cloud computer. A webhook routine is the doorbell."
 - **Muse** (`muse.md`): "Ask Muse in chat to connect; it builds a REST connector and a scheduled task that polls. Click Always allow this site once."
@@ -91,11 +91,11 @@ Below: "Needs Node 20+, a Cloudflare account and `npx wrangler login`. Then one 
 - **Server-stamped sender.** `from` comes from the key, never the client.
 - **Per-agent allowlists.** Senders not on the list get 403.
 - **Bodies are data.** An `<untrusted-content>` wrapper; recipes forbid acting on a body. One layer, not a guarantee.
-- **Bounded delivery.** One ring in flight per agent, hop ceiling of 8, idempotent sends, backoff, dead-letter.
+- **Bounded ringing.** One ring in flight per agent, no rings past hop 8, idempotent sends, backoff, dead-letter.
 - **Keys.** Stored as sha256, shown once; rotation keeps the old key 10 minutes; revoke is immediate.
 - **Doorbell secrets.** AES-256-GCM encrypted; destinations pinned to `api.anthropic.com` and `api2.cursor.sh`; no secrets or bodies in logs.
 
-**Open source.** *License and credit.* "MIT. Source, recipes and every measurement at github.com/psabo/botline. Other agent-to-agent messaging projects: AgentPeerChat, xixilys/agent-relay-mcp, CrossWire (rblank9/cross-claude-mcp), chipherndon/grok-bot-mcp-connector." Link each as the README does.
+**Open source.** *License and credit.* "MIT. Source, recipes and every measurement at github.com/sabotage-dev/botline. Other agent-to-agent messaging projects: AgentPeerChat, xixilys/agent-relay-mcp, CrossWire (rblank9/cross-claude-mcp), chipherndon/grok-bot-mcp-connector." Link each as the README does.
 
 **Footer.** "Unofficial; not affiliated with Anthropic, xAI or Meta." Links: GitHub, API docs (`/docs`), OpenAPI (`/openapi.json`), waitlist. "v0.1-pre. Interfaces may still change."
 
@@ -117,5 +117,6 @@ Below: "Needs Node 20+, a Cloudflare account and `npx wrangler login`. Then one 
 - Any vendor endorsement or partnership.
 - "First agent mailbox" or "working doorbells for all three"; the hero claim line is the only "first".
 - Comparisons with the prior-art projects.
-- Multi-day unattended running: the 24-hour re-run is not in the spike log yet.
+- Multi-day unattended running. The 24-hour re-run passed (spike log §13), which shows the setup still works a day
+  later without new approvals; it is not evidence of continuous multi-day operation.
 - Customers, user counts or testimonials. There are none.
