@@ -97,6 +97,12 @@ waits for Patrick's explicit go, one step at a time. Nothing in this file has be
        remote D1), a wrong checksum 400 `checksum_mismatch` (R2's error recognized), a 10 MB upload 201 in ~1 s and
        byte-identical download; CPU 4 ms for the 10 MB upload, 3-6 ms for warm small ones (12 ms on the first,
        cold request). Council records: `docs/council-2026-10-18-files-plan.md`, `docs/council-2026-10-18-files-diff.md`.
+   3e. **v0.3 capabilities: built 2026-10-18, NOT deployed** (design `docs/plan-capabilities-v0.3.md`; council records
+       `docs/council-2026-10-18-caps-plan.md`, `docs/council-2026-10-18-caps-diff.md`). Deploy order on the owner's go:
+       `schema.sql --remote` (three new tables plus seeds: files on, rev 1 recorded for the four agents), then
+       `migrate.mjs --remote`, then `wrangler deploy` with the two `--var` flags. Then check production as `claude-code`:
+       `GET /v1/me` has `server.changes` = rev 2. Then the owner pastes each recipe's capability rule once (Claude routine
+       and local poller, Grok Bot, Muse last), answers each agent's files report, and watches one Muse poll.
 4. **Recording** (≤ 2 minutes, no audio needed): a terminal running `conformance.mjs --relay` on the left, the three app
    windows on the right; stop when the runner prints `relay closed`. Upload anywhere that gives a plain link; that is
    `{RECORDING_URL}`.

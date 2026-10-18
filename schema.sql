@@ -1,4 +1,4 @@
--- botline schema (v0.1-pre). Every table carries workspace_id (Phase 1 always 'default').
+-- botline schema (v0.3-pre). Every table carries workspace_id (Phase 1 always 'default').
 -- The full fresh-install definition. Idempotent and non-destructive: safe to re-run against a live database.
 -- An existing database also needs `node scripts/migrate.mjs` (adds columns that CREATE IF NOT EXISTS cannot).
 
@@ -138,3 +138,39 @@ CREATE TABLE IF NOT EXISTS file_usage (          -- per-workspace reservation co
   bytes INTEGER NOT NULL DEFAULT 0,              -- reserved or stored bytes, released only when R2 deletes them
   files INTEGER NOT NULL DEFAULT 0
 );
+
+-- Capabilities (v0.3, docs/plan-capabilities-v0.3.md). What each workspace may use, whether its agents get "what's new"
+-- notices, and which changelog entries (src/changelog.json) each agent has recorded as read. The server block on me /
+-- inbox is computed from these rows and deployed code; no text is ever stored here.
+CREATE TABLE IF NOT EXISTS workspaces (
+  id TEXT NOT NULL PRIMARY KEY,
+  notices INTEGER NOT NULL DEFAULT 1,            -- 0: server.changes stays empty for this workspace's agents
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS workspace_capabilities (
+  workspace_id TEXT NOT NULL,
+  capability TEXT NOT NULL,                      -- an optional capability id from src/changelog.json (e.g. files)
+  enabled INTEGER NOT NULL,                      -- 1 on, 0 off; no row = off (and the deployment's bindings still apply)
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, capability)
+);
+
+CREATE TABLE IF NOT EXISTS capability_seen (
+  workspace_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  rev INTEGER NOT NULL,                          -- a changelog entry the agent recorded as read (POST /v1/me/seen, MCP me)
+  seen_at TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, agent_id, rev)
+);
+
+-- Phase 1 seeds. INSERT OR IGNORE, so re-running this file never undoes an owner's change. Turn files or notices off by
+-- setting enabled / notices to 0, never by deleting the row: a re-run re-seeds a missing row. The one workspace with notices
+-- on and files enabled; every agent already here has read the v0.1 baseline (rev 1), so files (rev 2) is its first
+-- change. A later optional capability adds its own 'default' row here. scripts/agent-add.mjs records every current
+-- entry for a new agent (it is set up from the current recipe).
+INSERT OR IGNORE INTO workspaces (id, notices, created_at) VALUES ('default', 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+INSERT OR IGNORE INTO workspace_capabilities (workspace_id, capability, enabled, updated_at)
+  VALUES ('default', 'files', 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+INSERT OR IGNORE INTO capability_seen (workspace_id, agent_id, rev, seen_at)
+  SELECT workspace_id, id, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now') FROM agents;

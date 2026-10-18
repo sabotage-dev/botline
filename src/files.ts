@@ -2,6 +2,7 @@
 // Bytes live in R2 (binding FILES) under ws/<workspace_id>/<file_id>; D1 holds metadata, access and accounting. A file is
 // usable only once state = 'ready': R2 verified the client's SHA-256 and the stored size matches the accepted length.
 // The Worker never hashes a REST body (Workers Free allows 10 ms CPU per request); MCP uploads are small, so it hashes those.
+import { hasCapability } from "./capabilities";
 import { ApiError, newId, now, type AgentRow, type Args, type Env } from "./store";
 
 export interface FileRow {
@@ -53,6 +54,14 @@ export function limits(env: Env) {
 export function requireFiles(env: Env): R2Bucket {
   if (!env.FILES) throw new ApiError(501, "files_not_configured", { message: "this deployment has no R2 bucket bound as FILES" });
   return env.FILES;
+}
+
+/** Every file entry point: the binding (501 without it), then the workspace's capability (403 where it is off). */
+async function requireEnabled(env: Env, ws: string): Promise<R2Bucket> {
+  const bucket = requireFiles(env);
+  if (!(await hasCapability(env, ws, "files")))
+    throw new ApiError(403, "capability_disabled", { capability: "files", message: "files are not enabled for this workspace" });
+  return bucket;
 }
 
 const keyOf = (ws: string, id: string): string | null => (SAFE_ID.test(ws) && FILE_ID.test(id) ? `ws/${ws}/${id}` : null);
@@ -183,7 +192,7 @@ async function storeFile(
 
 /** POST /v1/files?name=<filename>: raw bytes, Content-Type, Content-Length, x-botline-sha256 (hex of the body). */
 export async function uploadRest(env: Env, me: AgentRow, req: Request, url: URL) {
-  requireFiles(env);
+  await requireEnabled(env, me.workspace_id);
   const L = limits(env);
   const len = req.headers.get("content-length");
   if (len === null) throw new ApiError(411, "length_required", { message: "send Content-Length; chunked uploads are not accepted" });
@@ -200,7 +209,7 @@ export async function uploadRest(env: Env, me: AgentRow, req: Request, url: URL)
 
 /** MCP file_upload { name, content_base64, content_type? }: small files only (FILE_MCP_MAX_KB). */
 export async function uploadMcp(env: Env, me: AgentRow, a: Args) {
-  requireFiles(env);
+  await requireEnabled(env, me.workspace_id);
   const L = limits(env);
   const name = cleanName(a.name);
   const type = cleanType(a.content_type);
@@ -239,7 +248,7 @@ const rfc5987 = (s: string) => encodeURIComponent(s).replace(/['()*]/g, (c) => `
 
 /** GET /v1/files/<id>: the bytes, as an attachment, never rendered. */
 export async function downloadRest(env: Env, me: AgentRow, id: string): Promise<Response> {
-  const bucket = requireFiles(env);
+  const bucket = await requireEnabled(env, me.workspace_id);
   const f = await accessible(env, me, id);
   const obj = await bucket.get(key(f.workspace_id, f.id));
   if (!obj) return notFound(id);
@@ -259,13 +268,13 @@ export async function downloadRest(env: Env, me: AgentRow, id: string): Promise<
 
 /** GET /v1/files/<id>/meta */
 export async function meta(env: Env, me: AgentRow, id: string) {
-  requireFiles(env);
+  await requireEnabled(env, me.workspace_id);
   return { notice: FILE_NOTICE, file: info(await accessible(env, me, id)) };
 }
 
 /** MCP file_get { id }: text and small images inline (wrapped / with a notice), anything else as metadata + resource_link. */
 export async function getMcp(env: Env, me: AgentRow, a: Args, origin: string): Promise<McpContent> {
-  const bucket = requireFiles(env);
+  const bucket = await requireEnabled(env, me.workspace_id);
   const L = limits(env);
   const f = await accessible(env, me, a.id), fi = info(f);
   const textual = TEXTUAL.test(f.content_type), image = INLINE_IMAGE.test(f.content_type);
@@ -310,7 +319,7 @@ export function parseAttachments(v: unknown): string[] {
 
 /** Every id must be ready, unexpired, the sender's own upload, in the sender's workspace. */
 export async function checkAttachable(env: Env, me: AgentRow, ids: string[]): Promise<FileRow[]> {
-  requireFiles(env);
+  await requireEnabled(env, me.workspace_id);
   const rows = (await env.DB.prepare(
     `SELECT * FROM files WHERE workspace_id = ?1 AND id IN (SELECT value FROM json_each(?2))
        AND state = 'ready' AND uploader = ?3 AND expires_at > ?4`,

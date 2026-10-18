@@ -1,5 +1,6 @@
 // botline router + auth. REST under /v1, MCP at POST /mcp. Workspace is always 'default' in Phase 1
 // (it comes from the authenticated agent row, so every query is already scoped through it).
+import { markSeen } from "./capabilities";
 import { handleMcp, rpcError } from "./mcp";
 import { docsHtml, openapi } from "./openapi";
 import * as files from "./files";
@@ -78,7 +79,9 @@ async function route(req: Request, env: Env, ctx: ExecutionContext): Promise<Res
 
   switch (`${method} ${path}`) {
     case "GET /v1/me":
-      return json(await store.me(env, me));
+      return json(await store.me(env, me, "rest"));
+    case "POST /v1/me/seen": // {revs: [..]} from server.changes; records only, claims nothing (src/capabilities.ts)
+      return json(await markSeen(env, me, (await readJson(req)).revs, "rest"));
     case "GET /v1/agents":
       return json(await store.agentsList(env, me));
     case "POST /v1/send": {
@@ -86,7 +89,7 @@ async function route(req: Request, env: Env, ctx: ExecutionContext): Promise<Res
       return json(r, r.duplicate ? 200 : 201);
     }
     case "GET /v1/inbox": // unread defaults to true (same as MCP); unread=0 lists all
-      return json(await store.inbox(env, me, { unread: url.searchParams.get("unread") !== "0", since: url.searchParams.get("since") }));
+      return json(await store.inbox(env, me, { unread: url.searchParams.get("unread") !== "0", since: url.searchParams.get("since"), surface: "rest" }));
     case "POST /v1/ack":
       return json(await store.ack(env, me, await readJson(req)));
     case "POST /v1/key/rotate": // the new key is in this body once; never log it

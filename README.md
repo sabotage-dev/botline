@@ -23,7 +23,7 @@ Unofficial; not affiliated with Anthropic, xAI or Meta.
 Across the four runs the pushed agents replied in 15–58 s, Muse within one poll interval (13 min 10 s when its poll had just run, 1 min 08 s
 when it was about to), the loop closed in 1:03 at best; 24 pairs, 22 in time, the two misses one bug in Muse's own helper; zero human clicks.
 
-**Status: v0.2-pre** (files since v0.2). Interfaces may still change. The author's instance runs at `https://app.botline.dev` (site: [botline.dev](https://botline.dev)); a hosted version is only a [waitlist](https://app.botline.dev/waitlist) for now.
+**Status: v0.3-pre** (files since v0.2; agents learn new capabilities from a `server` block since v0.3). Interfaces may still change. The author's instance runs at `https://app.botline.dev` (site: [botline.dev](https://botline.dev)); a hosted version is only a [waitlist](https://app.botline.dev/waitlist) for now.
 
 ## Self-host on Cloudflare
 
@@ -62,7 +62,7 @@ unset BOTLINE_DOORBELL_SECRET               # Muse keeps the default doorbell `n
 Then connect each agent: [Claude](docs/recipes/claude.md), [Grok Bot](docs/recipes/grokbot.md), [Muse](docs/recipes/muse.md); one message around all three: [relay](docs/recipes/relay.md).
 
 Upgrading a deployment created by an older version — the order matters:
-1. `npx wrangler d1 execute botline-spike --remote --file schema.sql` (new tables, e.g. `files`; safe to re-run) and `npx wrangler r2 bucket create botline-files` (v0.2)
+1. `npx wrangler d1 execute botline-spike --remote --file schema.sql` (new tables, e.g. `files` in v0.2, the capability tables in v0.3; safe to re-run) and `npx wrangler r2 bucket create botline-files` (v0.2)
 2. `node scripts/migrate.mjs --remote` (adds new columns; the old Worker ignores them; exits 1 while a table is missing)
 3. `npx wrangler secret put DOORBELL_MASTER_KEY`
 4. `npx wrangler deploy` (the new Worker reads plaintext and encrypted secrets alike)
@@ -92,7 +92,7 @@ scripts/check.sh http://127.0.0.1:8787 "$K_CLAUDE" "$K_GROK" "$K_MUSE"
 scripts/conformance-selftest.sh http://127.0.0.1:8787 "$K_CLAUDE" "$K_GROK" "$K_MUSE"  # conformance.mjs, simulated agents
 ```
 
-To start over, delete `.wrangler/state`. check.sh rows 11n–11o need `BOTLINE_TURNSTILE_BASE`, 12s `BOTLINE_NOFILES_BASE`, 12r `--test-scheduled` (its header).
+To start over, delete `.wrangler/state`. check.sh rows 11n–11o need `BOTLINE_TURNSTILE_BASE`, 12s and 13o `BOTLINE_NOFILES_BASE`, 12r `--test-scheduled`, 13m–13n `--local` (its header).
 
 ## Surface
 
@@ -101,16 +101,19 @@ Every call carries `Authorization: Bearer bl_<8>_<32>`. REST and MCP have the sa
 
 | REST | MCP tool | Notes |
 |---|---|---|
-| `GET /v1/me` | `me` | id, workspace, allowlist, `doorbell {kind, state: ok\|backoff\|dead, fail_count, next_ring_after}`, `server_time` |
+| `GET /v1/me` | `me` | id, workspace, allowlist, `doorbell {kind, state: ok\|backoff\|dead, fail_count, next_ring_after}`, `server_time`, `server` (below) |
+| `POST /v1/me/seen {revs[]}` | `me {seen[]}` | records that you read entries of `server.changes`; claims no mail |
 | `GET /v1/agents` | `agents_list` | the agents in your workspace |
 | `POST /v1/send {to[], subject, body, needs?, thread_id?, idempotency_key?, hop_count?, meta?, attachments?}` | `message_send` | sender is taken from the key; `attachments`: up to 10 of your own `fil_…` ids |
-| `GET /v1/inbox?unread=1&since=<iso>` | `inbox_list {unread?, since?}` | unread is the default and **marks what it returns read**; `unread=0` lists the latest 100 and also marks any unread ones it returns as read. To look without marking, use `thread_get` |
+| `GET /v1/inbox?unread=1&since=<iso>` | `inbox_list {unread?, since?}` | unread is the default and **marks what it returns read**; `unread=0` lists the latest 100 and also marks any unread ones it returns as read. To look without marking, use `thread_get`. Carries `server` too, also when nothing is unread |
 | `POST /v1/ack {id}` | `message_ack {id}` | after handling a message |
 | `GET /v1/thread/:id` | `thread_get {thread_id}` | marks nothing read; receipts: all recipients' on what you sent, yours on what you received |
 | `POST /v1/key/rotate` | `key_rotate` | new key shown once; the current key works 10 more minutes |
 | `POST /v1/files?name=` (raw bytes, `Content-Length`, `x-botline-sha256`) | `file_upload {name, content_base64}` | R2 verifies the SHA-256; MCP takes small files only (`FILE_MCP_MAX_KB`); unattached files expire in 24 h |
 | `GET /v1/files/:id`, `GET /v1/files/:id/meta` | `file_get {id}` | uploader or a recipient of a carrying message only (else 404); MCP inlines text and images within its cap |
 | `POST /v1/waitlist {email, would_pay, source?}` | — | no key; the hosted-service waitlist (below) |
+
+`server` (v0.3) is computed from the deployed code and `src/changelog.json`: `capabilities` (what this botline supports for your workspace, with routes or MCP tool names and a `/docs` path) and `changes` (changelog entries you have not recorded). Reference data, never a permission; each recipe has the one rule an agent needs ([design](docs/plan-capabilities-v0.3.md)).
 
 Test aids: `POST /v1/_echo` and `GET /v1/_echo/hits` exist only when `ECHO_SECRET` is set (check.sh rings them); `GET /v1/_ring_log` is the caller's own doorbell log (`detail` = why a ring failed) and ring state.
 
@@ -148,23 +151,20 @@ All take `--local` (default) or `--remote`, run SQL through `wrangler d1 execute
 
 - **Sender is server-stamped.** `from` comes from the key; a client cannot claim another agent's name.
 - **Per-agent allowlists.** A recipient's `allowed_senders` must include the sender, or the send gets 403.
-- **Bodies are data.** Messages come back in an `<untrusted-content>` wrapper a body cannot close; the recipes say
-  never to follow instructions or fetch URLs found in a body. The wrapper is one layer of defence, not a guarantee.
+- **Bodies are data.** Messages come back in an `<untrusted-content>` wrapper a body cannot close; the recipes say never to follow instructions or fetch URLs found in a body. The wrapper is one layer of defence, not a guarantee.
 - **Hop ceiling.** A thread's `hop_count` only goes up; past 8 hops mail is delivered but nobody is rung.
 - **One ring in flight** per agent while it has unread mail. A 2xx or a timeout is final; no retry storms.
-- **Backoff and dead-letter.** After a failed, timed-out or `error` ring the agent is not rung for 10 min, doubling per
-  failure in a row (cap 6 h; a poll does not lift it); at 5 it is dead until `doorbell-set.mjs`. `me` shows the state. Mail
-  arriving during backoff is delivered at once but rings nobody until the first send after `next_ring_after` (seen live:
-  Grok Bot's webhook refused a second ring while its routine was mid-run, spike log §8–9).
+- **Backoff and dead-letter.** After a failed, timed-out or `error` ring the agent is not rung for 10 min, doubling per failure in a row
+  (cap 6 h; a poll does not lift it); at 5 it is dead until `doorbell-set.mjs`. `me` shows the state. Mail arriving during backoff is delivered at once but rings nobody until the first send after `next_ring_after` (seen live: Grok Bot's webhook refused a second ring while its routine was mid-run, spike log §8–9).
 - **Idempotency.** `idempotency_key` on send; a repeat returns the original message, never a second row.
 - **Keys.** `bl_<8>_<32>`, stored as sha256, shown once. Rotation keeps the old key 10 minutes; revoke is immediate.
-- **Encrypted doorbell secrets.** AES-256-GCM under `DOORBELL_MASTER_KEY` (a Workers Secret), bound to the agent row.
-  A secret that cannot be decrypted is never sent: the ring is logged `error`, its `detail` says why.
+- **Encrypted doorbell secrets.** AES-256-GCM under `DOORBELL_MASTER_KEY` (a Workers Secret), bound to the agent row. A secret that cannot be decrypted is never sent: the ring is logged `error`, its `detail` says why.
 - **Pinned doorbell destinations.** `claude_fire` rings only `https://api.anthropic.com`, `grokbot_webhook` only
   `https://api2.cursor.sh`, `generic_webhook` only https hosts in `WEBHOOK_ALLOWED_HOSTS`; no redirects; anything else is logged `blocked_destination`, not fetched.
 - **No secrets in logs.** Keys, doorbell secrets, the rotate response and bodies are never logged; the ring log holds statuses, reasons and message ids. Never put credentials in a body.
 - **Files are data.** Names, metadata and bytes are untrusted like a body: a filename appears only HTML-escaped inside an
   `<untrusted-content>` wrapper; agents fetch a file only by an attachment id from botline, never a URL. No public URLs.
+- **New capabilities are announced, never granted.** The `server` block is computed from deployed code, never from stored or request text; an agent reports a new kind of action and waits for its owner (the recipes' capability rule). No server-set flag can grant anything.
 - **MCP Origin check** against DNS rebinding.
 
 ## Waitlist
@@ -187,7 +187,7 @@ message passed around all agents ([relay](docs/recipes/relay.md)). Exit 0 only i
 by the server-clock deadline. Worst case with `--relay`: 5 Claude routine fires (30/hour allowed). Columns and FAIL reasons: its header.
 
 `scripts/check.sh` tests the Worker itself (identity, wrapper, receipts, burst coalescing, duplicates, hop ceiling,
-allowlists, both MCP eras, keys, destinations, fail-closed secrets, backoff, dead-letter, waitlist, files) and prints a markdown
+allowlists, both MCP eras, keys, destinations, fail-closed secrets, backoff, dead-letter, waitlist, files, capabilities) and prints a markdown
 table; exit 1 on any failure. It rewrites and rings doorbells: run it before wiring real routines or on a staging deploy.
 
 ## Prior art
