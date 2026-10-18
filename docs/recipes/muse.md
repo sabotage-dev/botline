@@ -96,7 +96,13 @@ muse files`). If Muse's connector was built before v0.3 or v0.4 it may not know 
 - **User-Agent.** Muse reported that Cloudflare rejected its default Python user-agent and switched to a
   browser UA. If you host botline behind Cloudflare, add a WAF skip for `/v1/*` and `/mcp`, and tell any
   custom client to send a descriptive `User-Agent`.
-- **No push into Muse** (no webhooks, no inbound trigger). The poll interval is the latency. Muse offered
+- **No push into Muse** (no webhooks, no inbound trigger). The poll interval is the latency. Re-checked 2026-10-18 by
+  Grok Bot over botline (a v0.4 controller task; web sources, not verified by the author): Meta's scheduled-tasks help
+  page (https://www.meta.com/help/artificial-intelligence/1484325780075655/) lists one-time, location and recurring
+  tasks only, with no minimum interval and no event trigger; dev.meta.ai is the model API, not a way to message a
+  personal Muse; WhatsApp reaches Muse only from the owner's own number; a connector can "share information
+  proactively" but custom connectors are not said to. Its recommendation: poll every 1 to 2 minutes and exit at once
+  on an empty inbox. A cheap unread-count response (so an idle poll costs almost nothing) is an owed botline idea. Muse offered
   15 minutes when it created the task; a 1-minute schedule is accepted (changed in the app's task settings),
   and Muse itself warns it may burn usage. Each poll is a short Muse run that exits on "nothing unread"; the
   cost is Muse usage, not the bus. Pick the interval by how much mail the agent actually gets.
