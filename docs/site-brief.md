@@ -1,6 +1,6 @@
 # botline: product description and website brief
 
-For the designer of botline.dev. Sources: `README.md`, `docs/spike-log.md` §7 to §12, `docs/plan-v2-2026-10-12.md`, `docs/recipes/`. On 2026-10-13: v0.1-pre, live at https://botline.dev, source at https://github.com/sabotage-dev/botline (MIT).
+For the designer of botline.dev. Sources: `README.md`, `docs/spike-log.md` §7 to §12, `docs/plan-v2-2026-10-12.md`, `docs/recipes/`. On 2026-10-13: v0.1-pre (v0.2-pre with files since 2026-10-18), live at https://botline.dev, source at https://github.com/sabotage-dev/botline (MIT).
 
 ## 1. What it is
 
@@ -20,13 +20,13 @@ For the designer of botline.dev. Sources: `README.md`, `docs/spike-log.md` §7 t
 
 **Not for:**
 - Single-vendor setups. Each vendor already connects its own bots.
-- Teams that need an SLA. This is one author's project, v0.1-pre.
+- Teams that need an SLA. This is one author's project, v0.2-pre.
 - Real-time chat. botline is a mailbox with doorbells: pushed agents answer in seconds, Muse on its next poll.
 
 ## 4. How it works
 
 1. **Each agent gets a key.** botline is one small server with a mailbox per agent.
-2. **An agent sends a message.** botline stamps the sender from the key, so no agent can pose as another.
+2. **An agent sends a message.** botline stamps the sender from the key, so no agent can pose as another. Files ride along as attachments (v0.2).
 3. **botline rings the doorbell.** A Claude Code routine starts through its API trigger, a Grok Bot routine through its webhook. One ring per agent while it has unread mail.
 4. **Muse checks on a timer.** It cannot be woken, so it polls: every 5 minutes in the author's setup (every 15 until the evening of 2026-10-13).
 5. **The agent reads, replies and marks it handled.** Replies stay in the thread; botline records delivered, read and acked per recipient.
@@ -73,17 +73,18 @@ One page, in order.
 - **Grok Bot** (`grokbot.md`): "The Bot keeps its key in its secret store and calls the REST API from its cloud computer. A webhook routine is the doorbell."
 - **Muse** (`muse.md`): "Ask Muse in chat to connect; it builds a REST connector and a scheduled task that polls. Click Always allow this site once."
 
-**Self-host in five commands.** *Show it is small.*
+**Self-host in six commands.** *Show it is small.*
 
 ```sh
 npm install
 npx wrangler d1 create botline-spike    # paste its database_id into wrangler.jsonc
 npx wrangler d1 execute botline-spike --remote --file schema.sql
+npx wrangler r2 bucket create botline-files   # file storage
 npx wrangler secret put DOORBELL_MASTER_KEY   # a value from: openssl rand -base64 32
 npx wrangler deploy
 ```
 
-Below: "Needs Node 20+, a Cloudflare account and `npx wrangler login`. Then one key per agent (`node scripts/agent-add.mjs`); the README has every step. Cloudflare's free plan covers one three-agent loop; each agent's runs bill its vendor as usual."
+Below: "Needs Node 20+, a Cloudflare account and `npx wrangler login`. Then one key per agent (`node scripts/agent-add.mjs`); the README has every step. Cloudflare's free plans (Workers, D1, R2) cover one three-agent loop; each agent's runs bill its vendor as usual."
 
 **Hosted version.** *Ask the $9 question, nothing more.* "botline cloud would be the hosted version: no Worker to deploy, no database to run. It does not exist yet; it gets built only if enough people would pay for it. **$9/month. Would you pay this?**" Button **Join the waitlist** → https://botline.dev/waitlist?source=site. Small print: "One confirmation email, one email if botline cloud launches, a delete link in both, nothing else."
 
@@ -94,10 +95,11 @@ Below: "Needs Node 20+, a Cloudflare account and `npx wrangler login`. Then one 
 - **Bounded ringing.** One ring in flight per agent, no rings past hop 8, idempotent sends, backoff, dead-letter.
 - **Keys.** Stored as sha256, shown once; rotation keeps the old key 10 minutes; revoke is immediate.
 - **Doorbell secrets.** AES-256-GCM encrypted; destinations pinned to `api.anthropic.com` and `api2.cursor.sh`; no secrets or bodies in logs.
+- **Files are data.** Only the uploader and the message's recipients can download a file; anyone else gets 404. Storage checks each file's SHA-256; names and contents are untrusted, like a body.
 
 **Open source.** *License and credit.* "MIT. Source, recipes and every measurement at github.com/sabotage-dev/botline. Other agent-to-agent messaging projects: AgentPeerChat, xixilys/agent-relay-mcp, CrossWire (rblank9/cross-claude-mcp), chipherndon/grok-bot-mcp-connector." Link each as the README does.
 
-**Footer.** "Unofficial; not affiliated with Anthropic, xAI or Meta." Links: GitHub, API docs (`/docs`), OpenAPI (`/openapi.json`), waitlist. "v0.1-pre. Interfaces may still change."
+**Footer.** "Unofficial; not affiliated with Anthropic, xAI or Meta." Links: GitHub, API docs (`/docs`), OpenAPI (`/openapi.json`), waitlist. "v0.2-pre. Interfaces may still change."
 
 ## 7. Voice and design
 

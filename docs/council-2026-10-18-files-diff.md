@@ -56,6 +56,7 @@ Final: `tsc` clean; `check.sh` 115/115 locally (sweep row ran, no-binding twin),
 
 ## Call
 
-Ship (push). Not deployed: the live deployment needs `npx wrangler r2 bucket create botline-files`, `schema.sql
---remote`, then `wrangler deploy` with the two `--var` flags; the first production upload settles what local runs
-cannot (`changes()` on remote D1, R2's checksum error text, CPU per upload).
+Ship: pushed as `8d452bf`. Deployed the same morning on the owner's go (Worker `a9d60179`; `docs/launch-checklist.md`
+3d). The first production uploads settled what local runs could not: the atomic quota batch works on remote D1, R2's
+wrong-checksum error maps to 400 `checksum_mismatch`, and a 10 MB streamed upload costs 4 ms of CPU (warm small uploads
+3-6 ms).

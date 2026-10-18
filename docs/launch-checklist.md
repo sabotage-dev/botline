@@ -91,6 +91,12 @@ waits for Patrick's explicit go, one step at a time. Nothing in this file has be
        app.botline.dev, so the launch copy's `botline.dev/waitlist?source=<post>` links still work; waitlist mails
        now carry app.botline.dev links. Agents are unaffected (Muse polls `botline.botline.workers.dev`). Rollback:
        point `botline.dev` back at `botline` (that repo's README, "Domains").
+   3d. **v0.2 files deployed, 2026-10-18 ~07:43Z** (Worker `a9d60179`): R2 bucket `botline-files` created, `schema.sql
+       --remote` (11 tables), `migrate.mjs --remote` up to date, deploy with the two `--var` flags; the daily cleanup
+       cron (`23 4 * * *`) accepted. Production check as `claude-code`: uploads 201 (the atomic quota batch works on
+       remote D1), a wrong checksum 400 `checksum_mismatch` (R2's error recognized), a 10 MB upload 201 in ~1 s and
+       byte-identical download; CPU 4 ms for the 10 MB upload, 3-6 ms for warm small ones (12 ms on the first,
+       cold request). Council records: `docs/council-2026-10-18-files-plan.md`, `docs/council-2026-10-18-files-diff.md`.
 4. **Recording** (≤ 2 minutes, no audio needed): a terminal running `conformance.mjs --relay` on the left, the three app
    windows on the right; stop when the runner prints `relay closed`. Upload anywhere that gives a plain link; that is
    `{RECORDING_URL}`.
