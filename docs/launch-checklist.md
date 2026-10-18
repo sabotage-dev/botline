@@ -108,8 +108,14 @@ waits for Patrick's explicit go, one step at a time. Nothing in this file has be
        This session's MCP client still showed the pre-deploy `me` schema (no `seen`): the tool-list lag the plan expects.
        **Owed (owner):** superseded by 3f: the v0.4 botline rule replaces the v0.3 capability rule (each recipe says
        to replace that paragraph), and grants replace the per-agent files answers.
-   3f. **v0.4 delegation: built 2026-10-18, NOT deployed** (design `docs/plan-delegation-v0.4.md`; council records
-       `docs/council-2026-10-18-deleg-plan.md`, `docs/council-2026-10-18-deleg-diff.md`). Deploy order on the owner's go:
+   3f. **v0.4 delegation: deployed 2026-10-18 ~19:57Z** (Worker version `632949df`; backup `backups/2026-10-18T1955Z.sql`;
+       queue `botline-rering` created and its consumer accepted on the current plan; `files` granted to grokbot and muse;
+       delegation ON with `claude-code` as controller of grokbot, claude and muse; `ECHO_SECRET` deleted. Production checks
+       passed: version 0.4.0-pre, `server.rev` 3, `/v1/_echo` and `/v1/_rering` 404, reserved meta 400, `peek=1` lists
+       without claiming, `peek=maybe` 400, ungranted `files` 403 `capability_not_granted`, every message carries `trust`
+       and `claimed`. **Owed (owner):** the botline-rule paste per agent; a real re-ring on a busy Grok Bot ring.)
+       Design `docs/plan-delegation-v0.4.md`; council records `docs/council-2026-10-18-deleg-plan.md`,
+       `docs/council-2026-10-18-deleg-diff.md`. The deploy order used:
        1. `scripts/backup.sh`
        2. `npx wrangler queues create botline-rering`
        3. `schema.sql --remote` (two new tables)
