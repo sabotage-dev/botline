@@ -131,6 +131,30 @@ waits for Patrick's explicit go, one step at a time. Nothing in this file has be
        8. `npx wrangler secret delete ECHO_SECRET` (set on production since the spike: it exposes the check.sh test routes
           `/v1/_echo` and `/v1/_rering`; `/v1/_ring_log`, which conformance.mjs reads, does not depend on it)
        Then the owner pastes each recipe's botline rule once (Grok Bot, the Claude routine, Muse last).
+   3g. **v0.5 deployed, 2026-10-22 ~20:05Z** (Worker version `90cec1ab`, commit `92da97e`; backup
+       `backups/2026-10-22T2004Z.sql`; design `docs/plan-v0.5.md`; council records `docs/council-2026-10-22-v05-plan.md`,
+       `docs/council-2026-10-22-v05-diff.md`). The order used:
+       1. `scripts/backup.sh` (the first try failed with Cloudflare auth error 10000; the retry a minute later worked)
+       2. `schema.sql --remote` (adds `agent_signals`)
+       3. `migrate.mjs --remote` (adds `agents.type`)
+       4. `wrangler deploy` with the two `--var` flags
+       5. `agent-type.mjs`: claude `claude-routine`, claude-code `claude-code`, grokbot `grokbot`, muse `muse`
+       6. `signal.mjs mint muse --remote` (the token is in `~/.config/botline/muse-signal.token`, mode 600)
+
+       Production checks passed on both hosts:
+       - version 0.5.0-pre, `server.rev` 5;
+       - `type` in `me` and `agents_list`;
+       - `/docs` has `#types` and `#signal`;
+       - `/v1/_echo` and `/v1/_rering` are 404;
+       - the watch URL: a bad token gives the same 404, Muse's is 200 with `no-store` and `no-referrer`;
+       - live counting on a temporary claude-code token: 4 → 3 (`latest` moved back to the next-newest) → 0 and null as
+         four already-read replies were acked; then revoked, 404.
+
+       Not exercised live: a controller task past hop 8 (check.sh 15g and 15h cover it).
+
+       **Owed (owner):** Muse's hook. Muse's own model said a token in a detector breaks its rule ("a 32-char token in a
+       URL is a bearer credential"); the owner decides in Muse's main chat. No paste is needed for Grok Bot or the Claude
+       routine: their botline rule records `server.changes` revs 4 and 5 by itself.
 4. **Recording** (≤ 2 minutes, no audio needed): a terminal running `conformance.mjs --relay` on the left, the three app
    windows on the right; stop when the runner prints `relay closed`. Upload anywhere that gives a plain link; that is
    `{RECORDING_URL}`.
