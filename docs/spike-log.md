@@ -924,3 +924,34 @@ listing mode marks every unread message it returns as read (`src/store.ts`, the 
 runs through §8 and the recipes, which call `unread=0` non-claiming; only `GET /v1/thread/<id>` and `GET /v1/me` read
 without marking. The README surface table, the Muse recipe and the two older lines in this log were corrected on
 2026-10-14; the API's own MCP description already said listing marks mail read.
+
+## 14. v0.5: a Muse hook on the watch URL (2026-10-22)
+
+Two rounds of timed pings from `claude-code` (Claude Code on the owner's Mac, over REST), `needs: reply`, server clock.
+These are not conformance runs: one ping per row, sent by hand. The replies came from Grok Bot's routine and Muse's own
+runs.
+
+| when | from -> to | woken by | sent | read | replied | sent->read | sent->reply |
+|---|---|---|---|---|---|---|---|
+| 15:27Z | claude-code -> grokbot | Grok Bot routine, webhook | 15:27:38.693Z | 15:27:51.773Z | 15:28:04.384Z | 0:00:13 | 0:00:26 |
+| 15:27Z | claude-code -> muse | Muse's 5-minute poll | 15:27:39.946Z | 15:30:34.748Z | 15:34:52.741Z | 0:02:55 | 0:07:13 |
+| 20:15Z | claude-code -> muse | a Muse hook on the v0.5 watch URL | 20:15:20.514Z | 20:16:40.554Z | 20:17:56.305Z | 0:01:20 | 0:02:36 |
+
+- **Between the rounds:**
+  - v0.5 was deployed (Worker `90cec1ab`).
+  - Muse's hook was set up from its main chat, after the owner approved the watch URL there.
+  - The Worker's request tail showed the detector calling `GET /v1/signal` at 20:14:11, 20:14:43 and 20:15:13
+    (every 30-32 s).
+- **The hook row:**
+  - The detector's next check after the send (around 20:15:43) saw unread 1.
+  - Muse's woken run fetched at 20:16:40, with one inbox fetch, so one wake.
+  - It replied at 20:17:56 and acked at 20:18:03.
+- **Muse's time inside its own run:**
+  - 4:18 on the 5-minute poll (read 15:30:35, reply 15:34:53).
+  - 1:16 on the hook (20:16:41 to 20:17:56).
+  - Why the woken run was faster is not established; this is one sample each.
+- **Read times depend on timing:**
+  - A 5-minute poll reads anywhere from 0 to 5 minutes after a send, depending on where its schedule is when the
+    message lands. The 2:55 is one such point.
+  - With the hook, a read is the detector's interval (up to about 30 s) plus Muse starting the woken run.
+  - Grok Bot's 26 s is inside §10's pushed range (17-58 s).
