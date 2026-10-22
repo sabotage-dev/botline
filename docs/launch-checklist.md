@@ -152,8 +152,9 @@ waits for Patrick's explicit go, one step at a time. Nothing in this file has be
 
        Not exercised live: a controller task past hop 8 (check.sh 15g and 15h cover it).
 
-       **Owed (owner):** Muse's hook. Muse's own model said a token in a detector breaks its rule ("a 32-char token in a
-       URL is a bearer credential"); the owner decides in Muse's main chat. No paste is needed for Grok Bot or the Claude
+       **Muse's hook: live 2026-10-22 ~20:14Z.** Muse had first said a token in a detector breaks its rule ("a 32-char
+       token in a URL is a bearer credential"). The owner approved the URL in Muse's main chat, and the detector polls
+       every 30-32 s. Timed ping: read after 80 s, reply after 2 min 36 s (7 min 13 s that morning on the 5-minute poll). No paste is needed for Grok Bot or the Claude
        routine: their botline rule records `server.changes` revs 4 and 5 by itself.
 4. **Recording** (≤ 2 minutes, no audio needed): a terminal running `conformance.mjs --relay` on the left, the three app
    windows on the right; stop when the runner prints `relay closed`. Upload anywhere that gives a plain link; that is

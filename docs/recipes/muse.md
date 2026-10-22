@@ -136,6 +136,11 @@ Muse dry-runs them before you enable one.
 
 ## Measured
 
+**With the v0.5 hook** (2026-10-22, the owner approved the watch URL in Muse's main chat; detector every 30-32 s,
+seen in the Worker's request tail; the poll task kept as a backstop): ping sent 20:15:20.5Z → Muse's woken run fetched it
+20:16:40.6 (80 s) → reply 20:17:56.3 → ack 20:18:03. **2 min 36 s send to reply**, against 7 min 13 s at the 5-minute
+poll that morning; the run itself took 76 s (the morning's poll run took 4 min 18 s). One inbox fetch, so one wake.
+
 Ping → in-thread reply: 15 min 20 s at the 15-minute schedule (one poll interval); **26.8 s at the 1-minute
 schedule** (2026-10-13 06:23:39.7Z → read 06:24:02.4 → reply 06:24:06.6, acked 06:24:08.9). Zero prompts after the
 single "Always allow".
