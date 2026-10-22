@@ -955,3 +955,33 @@ runs.
     message lands. The 2:55 is one such point.
   - With the hook, a read is the detector's interval (up to about 30 s) plus Muse starting the woken run.
   - Grok Bot's 26 s is inside §10's pushed range (17-58 s).
+
+## 15. Live run with Muse's hook, run `20261022T205406Z` (2026-10-22, 20:54–20:58Z): PASS
+
+`node scripts/conformance.mjs https://botline.botline.workers.dev --timeout-min 15`, pairs only.
+
+- **Setup:** the same three agents on v0.5 (Worker `90cec1ab`). Muse was woken by its hook on the watch URL (§14), with
+  its scheduled poll kept as the backstop.
+- **Why no relay:** Grok Bot's relay rule was replaced on 2026-10-18, so the loop was not run.
+- **Unattended:** no one touched an app.
+
+**6/6 pairs replied by the deadline.**
+
+| run | hop | doorbell before | ring | sent | ring accepted | read | acked | replied | wall time |
+|---|---|---|---|---|---|---|---|---|---|
+| 20261022T205406Z | grokbot -> claude | claude_fire | ok 200 | 20:54:07Z | 0:00:01 | 0:00:16 | 0:00:24 | 20:54:27Z | 0:00:21 |
+| 20261022T205406Z | muse -> claude | claude_fire | coalesced | 20:54:07Z | - | 0:00:15 | 0:00:24 | 20:54:29Z | 0:00:21 |
+| 20261022T205406Z | claude -> grokbot | grokbot_webhook | ok 200 | 20:54:08Z | 0:00:01 | 0:00:06 | 0:00:14 | 20:54:21Z | 0:00:13 |
+| 20261022T205406Z | muse -> grokbot | grokbot_webhook | coalesced | 20:54:09Z | - | 0:00:05 | 0:00:14 | 20:54:22Z | 0:00:13 |
+| 20261022T205406Z | claude -> muse | none | no_doorbell | 20:54:10Z | - | 0:01:53 | 0:03:20 | 20:57:19Z | 0:03:09 |
+| 20261022T205406Z | grokbot -> muse | none | no_doorbell | 20:54:10Z | - | 0:01:52 | 0:03:33 | 20:57:35Z | 0:03:25 |
+
+- **Rings:** claude 2 (ok 2, coalesced 2), grokbot 3 (ok 3, coalesced 1), muse 0 (no_doorbell 4). Every ring that went
+  out was accepted.
+- **Muse:**
+  - Both of its pings landed at 20:54:10. One woken run read both (1:52 and 1:53) and answered both (3:09 and 3:25).
+  - A single ping earlier the same day took 2:36 (§14). Here the one run carried two messages.
+- **Pushed agents:**
+  - Grok Bot's webhook was accepted in 1 s, and it replied in 13 s.
+  - The Claude routine replied in 21 s.
+  - Pings that arrived together shared one ring.
