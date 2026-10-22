@@ -36,6 +36,10 @@
 #      Section 14 (delegation, v0.4) saves delegation and the three agents' controllers and grants and restores them on
 #      exit; it adds a throwaway controller agent and a second workspace and deletes them on exit. Row 14j renames a table
 #      (--local only). Its timing row (14p) uses the echo doorbell's ?delay=, so it needs the ECHO_SECRET routes.
+#      Section 15 (v0.5: agent types, watch URLs, controller tasks past hop 8) runs inside section 14's gate and reuses
+#      its saved state. It saves the three agents' types and watch URLs and restores them on exit; it adds a throwaway
+#      agent (chk-type-*) and a third workspace and deletes them on exit. Rows 15j-15k rename a table and a column
+#      (--local only).
 #      Cleanup failures are printed as `warning: cleanup: …` lines on stderr.
 # Requires curl, jq, python3. Prints a markdown table; exits 1 if any step fails. Never prints a key.
 set -uo pipefail
@@ -54,6 +58,7 @@ RID=""; WLH=() # WLH: sha256 of each check address that may have waitlist_mail l
 FIDS=(); QB=""; QF="" # FIDS: files this run uploaded (expired on exit); QB/QF: file_usage bytes/files before the quota rows
 SEEN0=""; WSN0=""; WSF0=""; OWS=""; RENAMED="" # section 13: saved capability state, the second workspace, renamed tables
 GR0=""; CTL0=""; DEL0=""; CID=""; OWS2="" # section 12/14: saved grants, controllers, delegation; throwaway agent and workspace
+TY0=""; SIG0=""; OWS3=""; NT=""; RCOL="" # section 15: saved types and watch URLs, third workspace, throwaway agent, renamed column
 cleanup() {
   local w=() m
   (cd "$ROOT" && node scripts/doorbell-set.mjs muse none - "$MODE" >/dev/null 2>&1) \
@@ -61,11 +66,14 @@ cleanup() {
   d1 "UPDATE agents SET allowed_senders = '*' WHERE workspace_id = 'default' AND id = 'grokbot'" \
     || w+=("grokbot's allowed_senders was not restored to '*'")
   if [[ -n $RENAMED ]]; then # a 13m/13n table rename did not finish: put the real tables back first
-    for t in workspaces workspace_capabilities capability_seen agent_capabilities receipts; do
+    for t in workspaces workspace_capabilities capability_seen agent_capabilities receipts agent_signals; do
       if [[ $(d1q "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = '${t}_chk'" .n) == 1 ]]; then
         d1 "DROP TABLE IF EXISTS $t" && d1 "ALTER TABLE ${t}_chk RENAME TO $t" || w+=("table ${t}_chk was not renamed back to $t")
       fi
     done
+  fi
+  if [[ -n $RCOL ]]; then # a 15k column rename did not finish
+    d1 "ALTER TABLE receipts RENAME COLUMN trust_at_send_chk TO trust_at_send" || w+=("receipts.trust_at_send_chk was not renamed back to trust_at_send")
   fi
   if [[ -n $RID ]]; then
     d1 "DELETE FROM capability_seen WHERE workspace_id = 'default' AND agent_id = '$RID'" \
@@ -119,6 +127,23 @@ cleanup() {
   if [[ -n $OWS2 ]]; then
     for t in "agents WHERE workspace_id" "capability_seen WHERE workspace_id" "receipts WHERE workspace_id" "messages WHERE workspace_id" "ring_log WHERE workspace_id"; do
       d1 "DELETE FROM $t = '$OWS2'" || w+=("second-workspace rows were not deleted: DELETE FROM $t = '$OWS2'")
+    done
+  fi
+  [[ -z $TY0 ]] || d1 "UPDATE agents SET type = COALESCE((SELECT json_extract(value, '\$[1]') FROM json_each('$TY0') WHERE json_extract(value, '\$[0]') = agents.id), 'custom') WHERE workspace_id = 'default' AND id IN ('claude', 'grokbot', 'muse')" \
+    || w+=("types of claude, grokbot and muse were not restored")
+  if [[ -n $SIG0 ]]; then
+    d1 "DELETE FROM agent_signals WHERE workspace_id = 'default' AND agent_id IN ('claude', 'grokbot', 'muse')" \
+      && d1 "INSERT INTO agent_signals (workspace_id, agent_id, token_hash, created_at) SELECT 'default', json_extract(value, '\$[0]'), json_extract(value, '\$[1]'), json_extract(value, '\$[2]') FROM json_each('$SIG0')" \
+      || w+=("watch URLs of claude, grokbot and muse were not restored")
+  fi
+  if [[ -n $NT ]]; then
+    for t in "capability_seen WHERE workspace_id = 'default' AND agent_id" "agent_events WHERE workspace_id = 'default' AND agent_id" "agents WHERE workspace_id = 'default' AND id"; do
+      d1 "DELETE FROM $t = '$NT'" || w+=("throwaway agent rows were not deleted: DELETE FROM $t = '$NT'")
+    done
+  fi
+  if [[ -n $OWS3 ]]; then
+    for t in "agent_signals WHERE workspace_id" "agents WHERE workspace_id"; do
+      d1 "DELETE FROM $t = '$OWS3'" || w+=("third-workspace rows were not deleted: DELETE FROM $t = '$OWS3'")
     done
   fi
   for m in ${w[@]+"${w[@]}"}; do echo "warning: cleanup: $m" >&2; done
@@ -950,12 +975,129 @@ ACT=$(cd "$ROOT" && node scripts/activity.mjs --since 1h --limit 40 "$MODE" 2>/d
 row "14t activity.mjs: no key material; bodies only with --bodies, inside the wrapper; the trust change is logged" "no-keys no-bodies wrapped logged" \
   "$(grep -qE 'bl_[A-Za-z0-9]{8}_|key_hash|doorbell_secret' <<<"$ACT$ACTB" && echo keys || echo no-keys) $(grep -qF 'peer text' <<<"$ACT" && echo bodies || echo no-bodies) $(grep -qF 'field="body">peer text' <<<"$ACTB" && echo wrapped || echo unwrapped) $(grep -qE "key_rotate|controllers" <<<"$ACT" && echo logged || echo missing)"
 
+# 15. v0.5 (docs/plan-v0.5.md): agent types (P1), the watch URL (P2), controller tasks past hop 8 (P3). Inside section
+# 14's gate: delegation is on, grokbot's controller is claude, muse's doorbell rings <base>/v1/_echo.
+TY0=$(d1q "SELECT json_group_array(json_array(id, type)) AS a FROM agents WHERE workspace_id = 'default' AND id IN ('claude', 'grokbot', 'muse')" .a)
+SIG0=$(d1q "SELECT json_group_array(json_array(agent_id, token_hash, created_at)) AS a FROM agent_signals WHERE workspace_id = 'default' AND agent_id IN ('claude', 'grokbot', 'muse')" .a)
+[[ $TY0 == \[* && $SIG0 == \[* ]] || { TY0=""; SIG0=""; echo "cannot save types / watch URLs (schema.sql and migrate.mjs for v0.5?): stopping before section 15" >&2; exit 2; }
+sig() { call GET "/v1/signal?token=$1" "" ""; } # sets STATUS, BODY
+mint() { (cd "$ROOT" && node scripts/signal.mjs mint "$1" "$MODE" 2>/dev/null); }
+freelease() { d1 "UPDATE rings SET in_flight_since = NULL, lease_until = NULL WHERE workspace_id = 'default' AND agent = 'muse'"; }
+# rstat MSG: the first ring decision about MSG (its oldest ring_log row; a later ring's payload lists every unread id)
+rstat() { call GET /v1/_ring_log "$KM" ""; jq -r --arg m "$1" '[.entries[] | select(.message_ids | contains($m)) | .status] | last // "none"' <<<"$BODY"; }
+rnd32() { python3 -c 'import secrets, string; a = string.ascii_letters + string.digits; print("".join(secrets.choice(a) for _ in range(32)))'; }
+
+call GET /v1/me "$KCID2" ""; a=$(j .type)
+(cd "$ROOT" && node scripts/agent-type.mjs "$CID" muse "$MODE" >/dev/null 2>&1); call GET /v1/me "$KCID2" ""; b=$(j .type)
+(cd "$ROOT" && node scripts/agent-type.mjs "$CID" nonsense "$MODE" >/dev/null 2>&1) && c=accepted || c=refused
+call GET /v1/agents "$KC" ""; d="$(j '[.agents[] | select(.type == null)] | length') $(j "[.agents[] | select(.id == \"$CID\") | .type][0]") $(j '[.agents[0] | keys[]] | join(",")')"
+mt "$KC" agents_list '{}'; e=$(tool "[.agents[] | select(.id == \"$CID\") | .type][0]")
+NT="chk-type-$(now_ms)"; KNT=$(cd "$ROOT" && node scripts/agent-add.mjs "$NT" --type grokbot "$MODE" 2>/dev/null); call GET /v1/me "$KNT" ""; f=$(j .type)
+(cd "$ROOT" && node scripts/agent-add.mjs "chk-type-bad-$(now_ms)" --type nonsense "$MODE" >/dev/null 2>&1) && g=accepted || g=refused
+row "15a type: custom by default; agent-type.mjs sets muse (me); an unknown type is refused; agents_list (REST: every agent, four fields; MCP) carries it; agent-add --type" \
+  "custom muse refused 0 muse doorbell_kind,id,name,type muse grokbot refused" "$a $b $c $d $e $f $g"
+GRV='[.server.capabilities[] | "\(.id)=\(.granted)"] | join(",")'
+(cd "$ROOT" && node scripts/grant.mjs grant grokbot files "$MODE" >/dev/null 2>&1); call GET /v1/me "$KG" ""; G0=$(j "$GRV") # a grant to lose
+(cd "$ROOT" && node scripts/agent-type.mjs grokbot muse "$MODE" >/dev/null 2>&1)
+snd "$KC" '{"to":["grokbot"],"subject":"15a2","body":"x"}'; call GET '/v1/inbox?peek=1' "$KG" ""; a=$(tr_of "$MID")
+call GET /v1/me "$KG" ""; b=$(j "$GRV")
+(cd "$ROOT" && node scripts/agent-type.mjs grokbot custom "$MODE" >/dev/null 2>&1); call GET /v1/me "$KG" ""; c=$(j "$GRV")
+row "15a2 a type is a label: grokbot typed muse, then custom, keeps its controller and the grants it had before either change" \
+  "messages=true,files=true controller false $G0 $G0" "$G0 $a $b $c"
+call GET '/v1/inbox?unread=1' "$KG" ""
+
+call GET /v1/signal "" ""; a="$STATUS $BODY"
+sig ""; b="$STATUS $BODY"; sig "sig_short"; c="$STATUS $BODY"; sig "sig_$(rnd32)"; d="$STATUS $BODY"
+sig "$KM"; e="$STATUS $BODY"; call POST "/v1/signal?token=sig_$(rnd32)" "" ""; f=$STATUS
+NF='404 {"error":"not_found"}'
+row "15b watch URL without a usable token: missing / empty / malformed / unknown / an agent key: one identical 404; POST 405" \
+  "$NF|$NF|$NF|$NF|$NF|405" "$a|$b|$c|$d|$e|$f"
+
+call GET '/v1/inbox?unread=1' "$KM" ""
+EV0=$(d1q "SELECT COALESCE(MAX(id), 0) AS m FROM agent_events" .m) # 15e counts only the events from here on
+SG1=$(mint muse); [[ $SG1 =~ ^sig_[A-Za-z0-9]{32}$ ]] && a=shaped || a=unshaped
+sig "$SG1"
+hdr() { grep -i "^$1:" "$TMP/hdr" | tr -d '\r' | cut -d' ' -f2- | head -1; }
+row "15c minted (stdout: sig_ + 32): 200, exactly unread and latest, 0 and null, no-store, no-referrer" \
+  "shaped 200 latest,unread 0 null no-store no-referrer" "$a $STATUS $(j 'keys | join(",")') $(j .unread) $(j .latest) $(hdr cache-control) $(hdr referrer-policy)"
+
+snd "$KC" '{"to":["muse"],"subject":"15d 1","body":"x"}'; sleep 1
+snd "$KC" '{"to":["muse"],"subject":"15d 2","body":"x"}'; C2=$(j .message.created_at)
+d1 "UPDATE rings SET in_flight_since = '$(fut)', lease_until = '$(fut)' WHERE workspace_id = 'default' AND agent = 'muse'"
+sig "$SG1"; a="$(j .unread) $([[ $(j .latest) == "$C2" ]] && echo latest=second || echo "latest=$(j .latest)")"; sig "$SG1"
+call GET '/v1/inbox?peek=1' "$KM" ""; b="$(j .count) $(d1q "SELECT in_flight_since IS NOT NULL AS f FROM rings WHERE workspace_id = 'default' AND agent = 'muse'" .f)"
+call GET '/v1/inbox?unread=1' "$KM" ""; sig "$SG1"; c="$(j .unread) $(j .latest)"
+row "15d two sends: unread 2, latest = the second's created_at; two reads claim nothing (peek 2) and leave the in-flight lease; after a claim: 0 null" \
+  "2 latest=second 2 1 0 null" "$a $b $c"
+
+SG2=$(mint muse); sig "$SG1"; a=$STATUS; sig "$SG2"; b=$STATUS
+(cd "$ROOT" && node scripts/signal.mjs revoke muse "$MODE" >/dev/null 2>&1); sig "$SG2"; c=$STATUS
+d=$(d1q "SELECT SUM(kind = 'signal_mint') AS m, SUM(kind = 'signal_revoke') AS r FROM agent_events WHERE workspace_id = 'default' AND agent_id = 'muse' AND id > ${EV0:-0}" '"mints=\(.m) revokes=\(.r)"')
+e=$(d1q "SELECT COUNT(*) AS n FROM agent_events WHERE detail LIKE '%${SG1:4:16}%' OR detail LIKE '%${SG2:4:16}%'" .n)
+f=$(cd "$ROOT" && node scripts/signal.mjs show "$MODE" 2>&1 | grep -cE "${SG1:4:16}|${SG2:4:16}")
+row "15e re-mint: the old token 404, the new 200; revoke: 404; agent_events logs this run's two mints and one revoke, no token text; show prints none" \
+  "404 200 404 mints=2 revokes=1 0 0" "$a $b $c $d $e $f"
+
+SG3=$(mint muse); setctl muse '["claude"]'; call GET '/v1/inbox?unread=1' "$KM" ""
+snd "$KG" '{"to":["muse"],"subject":"15f peer 9","body":"x","hop_count":9}'; MPEER=$MID; sig "$SG3"; a=$(j .unread)
+freelease; snd "$KC" '{"to":["muse"],"subject":"15f ctl 9","body":"x","hop_count":9}'; MC9=$MID; sig "$SG3"; b=$(j .unread)
+freelease; snd "$KC" '{"to":["muse"],"subject":"15f ctl 33","body":"x","hop_count":33}'; MC33=$MID; sig "$SG3"; c=$(j .unread)
+setdel 0; sig "$SG3"; d=$(j .unread); setdel 1; setctl muse '[]'; sig "$SG3"; e=$(j .unread); setctl muse '["claude"]'
+call GET '/v1/inbox?peek=1' "$KM" ""; f=$(j .count)
+row "15f the watch URL counts ringable mail: peer hop 9 no; controller hop 9 yes; controller hop 33 no; delegation off / controller removed now: no; all delivered" \
+  "0 1 1 0 0 3" "$a $b $c $d $e $f"
+sleep 2; a="$(rstat "$MPEER") $(rstat "$MC9") $(rstat "$MC33")"
+call GET /v1/_echo/hits "$KC" ""; E0=$(j .count); freelease; setdel 0; snd "$KC" '{"to":["muse"],"subject":"15g deleg off","body":"x","hop_count":9}'; MDOFF=$MID; setdel 1
+freelease; snd "$KC" '{"to":["muse"],"subject":"15g ctl 9 again","body":"x","hop_count":9}'; MC9B=$MID; sleep 2
+call GET /v1/_echo/hits "$KC" ""; b=$(( $(j .count) - E0 ))
+row "15g the doorbell: peer hop 9 hop_ceiling; controller hop 9 rung (ok); controller hop 33 hop_ceiling; sent with delegation off: hop_ceiling; controller hop 9 again: ok, one echo" \
+  "hop_ceiling ok hop_ceiling hop_ceiling ok 1" "$a $(rstat "$MDOFF") $(rstat "$MC9B") $b"
+
+d1 "UPDATE rings SET rering_gen = 'chk15h', rering_at = '$PAST', lease_until = NULL, in_flight_since = NULL, fail_count = 0, busy_count = 0 WHERE workspace_id = 'default' AND agent = 'muse'"
+call POST /v1/_rering "$KM" '{"gen":"chk15h"}'; a=$(j .result); sleep 1
+call GET /v1/_ring_log "$KM" ""; IDS=$(j '.entries[0].message_ids')
+has() { jq -r --arg m "$1" --arg y "$2" --arg n "$3" 'if index($m) then $y else $n end' <<<"$IDS"; } # IDS: ring_log's JSON text
+row "15h a re-ring lists the hop-9 controller tasks, not the hop-9 peer message, the hop-33 task or the one sent with delegation off" \
+  "rang ok ctl ctl no-peer no-33 no-off" "$a $(j '.entries[0].status') $(has "$MC9" ctl no-ctl) $(has "$MC9B" ctl no-ctl) $(has "$MPEER" peer no-peer) $(has "$MC33" 33 no-33) $(has "$MDOFF" off no-off)"
+
+OWS3="chk-ws3-$(now_ms)"; SGO="sig_$(rnd32)"
+d1 "INSERT INTO agents (workspace_id, id, name, key_hash, allowed_senders, doorbell_kind, created_at, controllers) VALUES ('$OWS3', 'muse', 'muse', '$(newkey | tr -d '\n' | shasum -a 256 | cut -d' ' -f1)', '*', 'none', '$PAST', '[\"claude\"]')"
+d1 "INSERT INTO agent_signals (workspace_id, agent_id, token_hash, created_at) VALUES ('$OWS3', 'muse', '$(printf '%s' "$SGO" | shasum -a 256 | cut -d' ' -f1)', '$PAST')"
+snd "$KG" '{"to":["muse"],"subject":"15i","body":"x"}' # hop 0: ringable in any workspace's predicate, so a lost workspace filter shows
+sig "$SGO"; a="$STATUS $(j .unread) $(j .latest)"; sig "$SG3"; b=$( (( $(j .unread) > 0 )) && echo has-mail || echo empty)
+row "15i tenancy: another workspace's muse, its own token: 0 and null while default's muse has hop-0 mail" "200 0 null has-mail" "$a $b"
+call GET '/v1/inbox?unread=1' "$KM" ""; setctl muse '["claude","muse"]'; freelease # a raw edit: muse its own controller
+snd "$KM" '{"to":["muse"],"subject":"15f2 self","body":"x","hop_count":9}'; MSELF=$MID; sleep 2; sig "$SG3"; a="$(j .unread) $(rstat "$MSELF")"
+call GET "/v1/message/$MSELF" "$KM" ""; a="$a $(j .message.trust)"; setctl muse '["claude"]'
+row "15f2 an agent listed as its own controller (raw edit): its hop-9 message to itself is not counted, not rung, and reads peer" "0 hop_ceiling peer" "$a"
+
+if [[ $MODE == --local ]]; then
+  RENAMED=1; d1 "ALTER TABLE agent_signals RENAME TO agent_signals_chk"
+  sig "$SG3"; a="$STATUS $BODY"; call GET /v1/me "$KM" ""; b=$STATUS
+  d1 "ALTER TABLE agent_signals_chk RENAME TO agent_signals"; RENAMED=""; sig "$SG3"; c=$STATUS
+  row "15j no agent_signals table: the watch URL is the same 404, me still 200; table back: 200" "$NF 200 200" "$a $b $c"
+  call GET '/v1/inbox?unread=1' "$KM" ""; setdel 0
+  RCOL=1; d1 "ALTER TABLE receipts RENAME COLUMN trust_at_send TO trust_at_send_chk"
+  call GET /v1/_echo/hits "$KC" ""; E0=$(j .count)
+  freelease; snd "$KG" '{"to":["muse"],"subject":"15k hop 0","body":"x"}'; M0=$MID; a=$STATUS; sleep 2
+  call GET /v1/_echo/hits "$KC" ""; b=$(( $(j .count) - E0 ))
+  freelease; snd "$KC" '{"to":["muse"],"subject":"15k ctl 9","body":"x","hop_count":9}'; c=$STATUS; sleep 2; sig "$SG3"; d=$STATUS
+  e="$(rstat "$M0") $(rstat "$MID")"
+  d1 "ALTER TABLE receipts RENAME COLUMN trust_at_send_chk TO trust_at_send"; RCOL=""; setdel 1
+  row "15k no receipts.trust_at_send (before v0.4 migrate, delegation off): a hop-0 send still rings, hop 9 is hop_ceiling, the watch URL 404s" \
+    "201 1 201 404 ok hop_ceiling" "$a $b $c $d $e"
+  UM15_NOTE="v0.5 unmigrated rows: ran"
+else
+  UM15_NOTE="v0.5 unmigrated rows: skipped (not --local)"; echo "note: $UM15_NOTE" >&2
+fi
+call GET '/v1/inbox?unread=1' "$KM" ""; setctl muse '[]'
+
 fi # section 14 gate
 
-# 15. Table
+# 16. Table
 echo "| step | expected | actual | result |"
 echo "|---|---|---|---|"
 printf '%s\n' "${ROWS[@]}"
 echo
-echo "steps: ${#ROWS[@]}  failed: $FAILS  base: $BASE  $TS_NOTE  $NF_NOTE  $SW_NOTE  $UM_NOTE  $GT_NOTE  ${D14_NOTE:-}  at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "steps: ${#ROWS[@]}  failed: $FAILS  base: $BASE  $TS_NOTE  $NF_NOTE  $SW_NOTE  $UM_NOTE  $GT_NOTE  ${D14_NOTE:-}  ${UM15_NOTE:-}  at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 [[ $FAILS -eq 0 ]]

@@ -10,7 +10,8 @@ minute. No local execution, no MCP, no human clicks after setup.
 
 ## Setup (about 5 minutes, in the Grok Bot app)
 
-1. Create the agent on botline and keep its key: `node scripts/agent-add.mjs grokbot --remote`.
+1. Create the agent on botline and keep its key: `node scripts/agent-add.mjs grokbot --type grokbot --remote`. The id is
+   only an address (`grokbot` below); a second Grok Bot is a second id with its own key, routine and webhook.
 2. In the Bot's chat, paste:
 
    > Connect to botline, a REST API (docs https://<your-botline>/docs). It needs one header on every

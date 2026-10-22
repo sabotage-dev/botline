@@ -1,4 +1,4 @@
--- botline schema (v0.4-pre). Every table carries workspace_id (Phase 1 always 'default').
+-- botline schema (v0.5-pre). Every table carries workspace_id (Phase 1 always 'default').
 -- The full fresh-install definition. Idempotent and non-destructive: safe to re-run against a live database.
 -- An existing database also needs `node scripts/migrate.mjs` (adds columns that CREATE IF NOT EXISTS cannot).
 
@@ -17,6 +17,8 @@ CREATE TABLE IF NOT EXISTS agents (
   created_at TEXT NOT NULL,
   controllers TEXT NOT NULL DEFAULT '[]',        -- v0.4: JSON array of agent ids whose messages are tasks for THIS agent
                                                  -- (only while the workspace has delegation on; scripts/agent-trust.mjs)
+  type TEXT NOT NULL DEFAULT 'custom',           -- v0.5: the runtime it is (src/agent-types.json; scripts/agent-type.mjs).
+                                                 -- A label only: nothing on the server decides anything from it.
   PRIMARY KEY (workspace_id, id)
 );
 
@@ -203,6 +205,18 @@ CREATE TABLE IF NOT EXISTS agent_events (
   agent_id TEXT NOT NULL,                        -- the agent the event is about
   at TEXT NOT NULL,
   kind TEXT NOT NULL,                            -- key_rotate | key_revoke | controllers | delegation | grant | revoke
+                                                 -- | type | signal_mint | signal_revoke (v0.5)
   detail TEXT                                    -- ids and values only; never a key or a secret
 );
 CREATE INDEX IF NOT EXISTS agent_events_at ON agent_events (workspace_id, at);
+
+-- Watch URLs (v0.5, docs/plan-v0.5.md P2). GET /v1/signal?token=sig_<32> answers, with no key, how much ringable unread
+-- mail one agent has and when the newest arrived; nothing else. Only the token's sha256 is stored, one live token per
+-- agent; scripts/signal.mjs is the only writer (mint replaces, revoke deletes). Nothing here seeds a row.
+CREATE TABLE IF NOT EXISTS agent_signals (
+  workspace_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,               -- sha256 hex of the sig_ token
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, agent_id)
+);

@@ -4,6 +4,7 @@ import { markSeen } from "./capabilities";
 import { rering, type RingJob } from "./doorbell";
 import { handleMcp, rpcError } from "./mcp";
 import { docsHtml, openapi } from "./openapi";
+import { signal } from "./signal";
 import * as files from "./files";
 import * as store from "./store";
 import { ApiError, isObj, VERSION, type Env } from "./store";
@@ -86,6 +87,9 @@ async function route(req: Request, env: Env, ctx: ExecutionContext): Promise<Res
     }
   }
   if (!path.startsWith("/v1/")) return json({ error: "not_found" }, 404);
+  // v0.5 watch URL: no key, the token in the query string picks the agent (src/signal.ts).
+  if (path === "/v1/signal")
+    return method === "GET" ? signal(env, url) : new Response(null, { status: 405, headers: { allow: "GET" } });
 
   const me = await store.authenticate(env, req);
   if (!me) return unauthorized();

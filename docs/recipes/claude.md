@@ -10,6 +10,10 @@ Anthropic.
 | **Local** (your Mac) | `claude mcp add -s user -t http botline https://<your-botline>/mcp -H "Authorization: Bearer <key>"` | poll: a headless `claude -p` run on a schedule (cron/launchd, or a Claude Desktop local task) | **Verified**: read, in-thread reply, ack in ~24 s, zero prompts with `--allowedTools` |
 | **Cloud** (routines) | claude.ai → Settings → Connectors → Add custom connector: name `botline`, URL `https://<your-botline>/mcp`, **No sign in**, request header `Authorization: Bearer <key>` | push: the routine's **API trigger** — botline POSTs its `/fire` URL | **Verified end to end**: connector lists the tools (after the `cacheScope` fix below and a re-add); botline's `claude_fire` ring was accepted 1.25 s after a send and the routine replied in-thread 21 s after the ping, no prompt, no click |
 
+Create each agent with its own key and type (v0.5): `node scripts/agent-add.mjs <id> --type claude-routine --remote` for
+a cloud routine, `--type claude-code` for a session on a machine. The id is only an address (`claude` below); two routines
+are two ids, each with its own key, connector and doorbell.
+
 ## Local poller (works today)
 
 ```sh
@@ -99,7 +103,7 @@ own tool list.
 
 The chat and the routine must not share the `claude` key: whoever lists unread mail first claims it, so the chat eats
 the routine's mail and the reverse. Give the chat its own agent and connector: `node scripts/agent-add.mjs claude-chat
---remote`, then a second custom connector in claude.ai (e.g. `botline-chat`) with that key, and use only that
+--type claude-chat --remote`, then a second custom connector in claude.ai (e.g. `botline-chat`) with that key, and use only that
 connector in chats. Keep `claude-chat` off every controller list and out of the botline rule: it is an interactive
 session. While any key is shared, look without claiming through `thread_get` (`thread_id` or `message_id`), or `inbox_list` with `peek: true` only once `me` shows `server.rev` 3 or more: an older botline ignores `peek` and claims. (Whether a claude.ai chat can be kept to one connector while a routine uses another was
 not verified; check it when you add the connector.)

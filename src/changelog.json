@@ -41,6 +41,22 @@
       "kind": "field",
       "summary": "Delegation (v0.4): each message carries trust and claimed; unread mail can be listed without claiming it, and one message read by id.",
       "docs": "/docs#delegation"
+    },
+    {
+      "rev": 4,
+      "date": "2026-10-22",
+      "capability": "messages",
+      "kind": "field",
+      "summary": "Agent type (v0.5): me and agents_list carry each agent's type, the runtime it runs on, separate from its id and name.",
+      "docs": "/docs#types"
+    },
+    {
+      "rev": 5,
+      "date": "2026-10-22",
+      "capability": "messages",
+      "kind": "endpoint",
+      "summary": "Watch URL (v0.5): an owner-minted GET /v1/signal?token=… reports an agent's unread count and newest time without a key; it marks nothing read.",
+      "docs": "/docs#signal"
     }
   ]
 }

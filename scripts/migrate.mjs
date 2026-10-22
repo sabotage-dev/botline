@@ -7,7 +7,9 @@ import { readFileSync } from "node:fs";
 import { die, parseArgs, runQuery, runSql } from "./_d1.mjs";
 
 const COLUMNS = {
-  agents: { key_hash_prev: "TEXT", prev_valid_until: "TEXT", controllers: "TEXT NOT NULL DEFAULT '[]'" }, // v0.1 grace; v0.4
+  agents: { // v0.1 grace; v0.4 controllers; v0.5 type
+    key_hash_prev: "TEXT", prev_valid_until: "TEXT", controllers: "TEXT NOT NULL DEFAULT '[]'", type: "TEXT NOT NULL DEFAULT 'custom'",
+  },
   rings: {
     fail_count: "INTEGER NOT NULL DEFAULT 0", // v0.1: doorbell backoff + dead-letter
     busy_count: "INTEGER NOT NULL DEFAULT 0", rering_at: "TEXT", rering_gen: "TEXT", rering_hour: "TEXT", // v0.4: busy and

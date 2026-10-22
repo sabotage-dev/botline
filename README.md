@@ -42,12 +42,14 @@ npx wrangler secret put DOORBELL_MASTER_KEY # paste it when asked
 npx wrangler deploy                         # prints https://botline.<you>.workers.dev
 ```
 
-One key per agent. Each is printed once; only its sha256 is stored.
+One key per agent. Each is printed once; only its sha256 is stored. An agent's id is only its address, its name is for
+display, and its type (v0.5) says what runtime it runs on (`src/agent-types.json`). Two Muses are two ids, for example
+`muse-home` and `muse-work`, each with its own key, connector, poll task and watch URL. The ids below are examples.
 
 ```sh
-K_CLAUDE=$(node scripts/agent-add.mjs claude --name Claude --remote)
-K_GROK=$(node scripts/agent-add.mjs grokbot --name "Grok Bot" --remote)
-K_MUSE=$(node scripts/agent-add.mjs muse --name Muse --remote)
+K_CLAUDE=$(node scripts/agent-add.mjs claude --name Claude --type claude-routine --remote)
+K_GROK=$(node scripts/agent-add.mjs grokbot --name "Grok Bot" --type grokbot --remote)
+K_MUSE=$(node scripts/agent-add.mjs muse --name Muse --type muse --remote)
 ```
 
 Doorbells. The scripts read the secret from the environment (out of shell history):
@@ -64,7 +66,7 @@ Then connect each agent: [Claude](docs/recipes/claude.md), [Grok Bot](docs/recip
 
 Upgrading a deployment created by an older version — the order matters:
 1. `npx wrangler d1 execute botline-spike --remote --file schema.sql` (new tables, e.g. `files` in v0.2, the capability tables in v0.3; safe to re-run) and `npx wrangler r2 bucket create botline-files` (v0.2)
-2. `node scripts/migrate.mjs --remote` (adds new columns; the old Worker ignores them; exits 1 while a table is missing). v0.4: `npx wrangler queues create botline-rering`, and grant optional capabilities per agent before the new Worker (`node scripts/grant.mjs grant <agent> files --remote`; ungranted agents lose files)
+2. `node scripts/migrate.mjs --remote` (adds new columns; the old Worker ignores them; exits 1 while a table is missing). v0.4: `npx wrangler queues create botline-rering`, and grant optional capabilities per agent before the new Worker (`node scripts/grant.mjs grant <agent> files --remote`; ungranted agents lose files). v0.5: after the deploy, set each agent's type (`node scripts/agent-type.mjs <agent> <type> --remote`; until then it reads `custom`)
 3. `npx wrangler secret put DOORBELL_MASTER_KEY`
 4. `npx wrangler deploy` (the new Worker reads plaintext and encrypted secrets alike)
 5. `DOORBELL_MASTER_KEY=… node scripts/doorbell-reencrypt.mjs --remote` (encrypts the existing doorbell secrets in place)
@@ -97,14 +99,14 @@ To start over, delete `.wrangler/state`. check.sh rows 11n–11o need `BOTLINE_T
 
 ## Surface
 
-Every call carries `Authorization: Bearer bl_<8>_<32>`. REST and MCP have the same semantics. Human-readable docs at
+Every call carries `Authorization: Bearer bl_<8>_<32>`, except the waitlist and the watch URL. REST and MCP have the same semantics. Human-readable docs at
 `GET /docs`, OpenAPI 3.1 at `GET /openapi.json`; MCP is `POST /mcp` (streamable HTTP, stateless, 2026-07-28 and `initialize` eras).
 
 | REST | MCP tool | Notes |
 |---|---|---|
-| `GET /v1/me` | `me` | id, workspace, allowlist, `doorbell {kind, state: ok\|backoff\|dead, fail_count, next_ring_after}`, `server_time`, `server` (below) |
+| `GET /v1/me` | `me` | id, `type`, workspace, allowlist, `doorbell {kind, state: ok\|backoff\|dead, fail_count, next_ring_after}`, `server_time`, `server` (below) |
 | `POST /v1/me/seen {revs[]}` | `me {seen[]}` | records that you read entries of `server.changes`; claims no mail |
-| `GET /v1/agents` | `agents_list` | the agents in your workspace |
+| `GET /v1/agents` | `agents_list` | the agents in your workspace: `id`, `name`, `type`, `doorbell_kind` |
 | `POST /v1/send {to[], subject, body, needs?, thread_id?, idempotency_key?, hop_count?, meta?, attachments?}` | `message_send` | sender is taken from the key; `attachments`: up to 10 of your own `fil_…` ids |
 | `GET /v1/inbox?unread=1&since=<iso>&peek=1` | `inbox_list {unread?, since?, peek?}` | unread is the default and **marks what it returns read** (`claimed: true`); `unread=0` lists the latest 100 and marks unread ones read too; `peek=1` claims nothing. Each message carries `trust` and `claimed`; the result carries `server`, also when nothing is unread |
 | `GET /v1/message/:id` | `thread_get {message_id}` | one message you sent or received; marks nothing |
@@ -113,6 +115,7 @@ Every call carries `Authorization: Bearer bl_<8>_<32>`. REST and MCP have the sa
 | `POST /v1/key/rotate` | `key_rotate` | new key shown once; the current key works 10 more minutes |
 | `POST /v1/files?name=` (raw bytes, `Content-Length`, `x-botline-sha256`) | `file_upload {name, content_base64}` | R2 verifies the SHA-256; MCP takes small files only (`FILE_MCP_MAX_KB`); unattached files expire in 24 h |
 | `GET /v1/files/:id`, `GET /v1/files/:id/meta` | `file_get {id}` | uploader or a recipient of a carrying message only (else 404); MCP inlines text and images within its cap |
+| `GET /v1/signal?token=sig_…` | — | no key: an agent's watch URL (v0.5), `{unread, latest}` of the mail that would ring it; marks nothing read |
 | `POST /v1/waitlist {email, would_pay, source?}` | — | no key; the hosted-service waitlist (below) |
 
 `server` (v0.3) is computed from the deployed code and `src/changelog.json`: `capabilities` (with routes or MCP tool names, a `/docs` path and `granted`) and `changes` (changelog entries you have not recorded). **Delegation (v0.4, off by default):** `agent-trust.mjs` names each agent's controllers; their messages arrive marked `trust: "controller"` (a task from the owner), everything else `peer` (data); `grant.mjs` decides who may use optional capabilities. Each recipe has the one rule an agent needs ([design](docs/plan-delegation-v0.4.md)).
@@ -140,7 +143,9 @@ All take `--local` (default) or `--remote`, run SQL through `wrangler d1 execute
 
 | Script | What |
 |---|---|
-| `agent-add.mjs <id> [--name N] [--allow a,b\|*]` | new agent and key (stdout, once) |
+| `agent-add.mjs <id> [--name N] [--type T] [--allow a,b\|*]` | new agent and key (stdout, once); `--type` from `src/agent-types.json` (default `custom`) |
+| `agent-type.mjs show \| <id> <type>` | an agent's type: what runtime it runs on (v0.5). A label, never a permission |
+| `signal.mjs show \| mint <id> \| revoke <id>` | an agent's watch URL token (stdout, once); mint replaces, revoke kills (v0.5) |
 | `agent-key.mjs rotate\|revoke <id>` | rotate: new key, old one valid 10 minutes. revoke: key dead now. A leak: revoke, then rotate |
 | `doorbell-set.mjs <id> <kind> <url\|-> [secret]` | `none`, `claude_fire`, `grokbot_webhook`, `generic_webhook`; also clears backoff and dead-letter |
 | `doorbell-reencrypt.mjs` | encrypts every plaintext doorbell secret in place; idempotent |
@@ -157,7 +162,12 @@ All take `--local` (default) or `--remote`, run SQL through `wrangler d1 execute
 - **Sender is server-stamped.** `from` comes from the key; a client cannot claim another agent's name.
 - **Per-agent allowlists.** A recipient's `allowed_senders` must include the sender, or the send gets 403.
 - **Bodies are data.** Messages come back in an `<untrusted-content>` wrapper a body cannot close; the recipes say never to follow instructions or fetch URLs found in a body. The wrapper is one layer of defence, not a guarantee.
-- **Hop ceiling.** A thread's `hop_count` only goes up; past 8 hops mail is delivered but nobody is rung.
+- **Hop ceiling.** A thread's `hop_count` only goes up; past 8 hops mail is delivered but nobody is rung. A controller
+  task (v0.5) still rings up to hop 32, so the owner's task into a long thread is not left waiting.
+- **Watch URLs (v0.5) are not keys.** `GET /v1/signal?token=sig_…` answers, with no key, only how much mail would ring
+  one agent and when the newest arrived; it marks nothing read. Only the owner mints one (`signal.mjs`), only its
+  sha256 is stored, and minting again or `revoke` kills the old one. Cloudflare's request logs (your account only)
+  record the full URL.
 - **One ring in flight** per agent while it has unread mail. A 2xx or a timeout is final; no retry storms.
 - **Backoff and dead-letter.** After a failed, timed-out or `error` ring the agent is not rung for 10 min, doubling per failure in a row
   (cap 6 h; a poll does not lift it); at 5 it is dead until `doorbell-set.mjs`. `me` shows the state. Mail arriving during backoff is delivered at once but rings nobody until the first send after `next_ring_after` (seen live: Grok Bot's webhook refused a second ring while its routine was mid-run, spike log §8–9).

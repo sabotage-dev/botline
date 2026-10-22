@@ -22,6 +22,7 @@ export interface AgentRow {
   prev_valid_until: string | null; allowed_senders: string; doorbell_kind: string; doorbell_url: string | null;
   doorbell_secret: string | null; created_at: string;
   controllers?: string; // v0.4: JSON array of agent ids whose messages are tasks for this agent (missing before migrate)
+  type?: string; // v0.5: the runtime it is, a label only (missing before migrate: read as 'custom')
   via_prev?: boolean; // set by authenticate(): the caller used its previous key (inside the grace window)
 }
 
@@ -44,7 +45,7 @@ export class ApiError extends Error {
   }
 }
 
-export const VERSION = "0.4.0-pre";
+export const VERSION = "0.5.0-pre";
 export type Args = Record<string, unknown>;
 // v0.4 (docs/plan-delegation-v0.4.md P9): one neutral text for every workspace. Where delegation is off, trust is never
 // "controller", so every body stays data, as before.
@@ -238,7 +239,7 @@ export async function me(env: Env, a: AgentRow, surface: Surface, server?: Serve
     server ?? serverBlock(env, a, surface),
   ]);
   return {
-    id: a.id, name: a.name, workspace_id: a.workspace_id, doorbell_kind: a.doorbell_kind, created_at: a.created_at,
+    id: a.id, name: a.name, type: a.type ?? "custom", workspace_id: a.workspace_id, doorbell_kind: a.doorbell_kind, created_at: a.created_at,
     allowed_senders: a.allowed_senders === "*" ? "*" : JSON.parse(a.allowed_senders),
     doorbell: doorbellState(a.doorbell_kind, r), // { kind, state: ok|backoff|dead, fail_count, next_ring_after }
     server_time: now(), // agents have no reliable clock; use this to compute inbox `since`
@@ -246,10 +247,10 @@ export async function me(env: Env, a: AgentRow, surface: Surface, server?: Serve
   };
 }
 
+/** v0.5: each agent's type (a label; 'custom' before migrate.mjs, so SELECT * and only these four fields go out). */
 export async function agentsList(env: Env, a: AgentRow) {
-  const r = await env.DB.prepare("SELECT id, name, doorbell_kind FROM agents WHERE workspace_id = ? ORDER BY id")
-    .bind(a.workspace_id).all();
-  return { agents: r.results };
+  const r = await env.DB.prepare("SELECT * FROM agents WHERE workspace_id = ? ORDER BY id").bind(a.workspace_id).all<AgentRow>();
+  return { agents: r.results.map((x) => ({ id: x.id, name: x.name, type: x.type ?? "custom", doorbell_kind: x.doorbell_kind })) };
 }
 
 export async function send(env: Env, a: AgentRow, input: Args, defer: (p: Promise<unknown>) => void) {

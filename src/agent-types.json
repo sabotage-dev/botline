@@ -1,0 +1,10 @@
+{
+  "types": [
+    { "id": "claude-routine", "label": "Claude Code routine (cloud, woken by its API trigger)", "doorbell": "claude_fire", "recipe": "docs/recipes/claude.md" },
+    { "id": "claude-code", "label": "Claude Code on a machine (MCP or REST, polls)", "doorbell": "none", "recipe": "docs/recipes/claude.md" },
+    { "id": "claude-chat", "label": "claude.ai chat (interactive, its own connector)", "doorbell": "none", "recipe": "docs/recipes/claude.md" },
+    { "id": "grokbot", "label": "Grok Bot routine (woken by its webhook)", "doorbell": "grokbot_webhook", "recipe": "docs/recipes/grokbot.md" },
+    { "id": "muse", "label": "Meta Muse (polls; a hook can watch its watch URL)", "doorbell": "none", "recipe": "docs/recipes/muse.md" },
+    { "id": "custom", "label": "Any other agent", "doorbell": "none", "recipe": "README.md" }
+  ]
+}

@@ -10,8 +10,10 @@
 //  - after an ordinary failure with mail waiting, a re-ring when the backoff ends (until dead-letter).
 //  - every re-ring is a persisted token (rings.rering_gen); a queue message with another token is stale. At most
 //    RERING_PER_HOUR automatic re-rings per agent per hour. A re-ring claims the lease like a send's ring.
+// v0.5 (docs/plan-v0.5.md P3): a controller task rings past HOP_CEILING, up to CONTROLLER_HOP_CEILING; RINGABLE_SQL is
+// the one definition, shared with the watch URL (src/signal.ts).
 // Core holds no vendor logic: adapters do (including which destinations they accept and what "busy" looks like).
-import type { AgentRow, Env, Message } from "./store";
+import { controllersOf, delegationOn, type AgentRow, type Env, type Message } from "./store";
 import { openSecret } from "./secrets";
 import * as claude_fire from "./adapters/claude_fire";
 import * as generic_webhook from "./adapters/generic_webhook";
@@ -19,6 +21,7 @@ import * as grokbot_webhook from "./adapters/grokbot_webhook";
 import * as none from "./adapters/none";
 
 export const HOP_CEILING = 8;
+export const CONTROLLER_HOP_CEILING = 32;
 const LEASE_MS = 10 * 60_000;
 const TIMEOUT_MS = 15_000;
 export const BACKOFF_BASE_MIN = 10;
@@ -38,6 +41,23 @@ interface AdapterModule { ring: Adapter; allows: (url: URL, env: Env) => boolean
 export interface RingJob { ws: string; agent: string; gen: string }
 
 const ADAPTERS: Record<string, AdapterModule> = { claude_fire, grokbot_webhook, generic_webhook, none };
+
+/** Is this message ringable for the recipient (receipts r JOIN messages m)? Within HOP_CEILING; or, up to
+ *  CONTROLLER_HOP_CEILING, a controller task the recipient would see as one now (store.ts trustFor's conditions: stamped
+ *  controller at send, delegation on, the sender still on the list, not the recipient itself). `deleg` binds 0 or 1,
+ *  `ctl` the recipient's controllers as a JSON array. Needs receipts.trust_at_send (v0.4 migrate.mjs). */
+export const RINGABLE_SQL = (deleg: string, ctl: string) =>
+  `(m.hop_count <= ${HOP_CEILING} OR (${deleg} = 1 AND m.hop_count <= ${CONTROLLER_HOP_CEILING} AND m.from_agent <> r.agent
+     AND r.trust_at_send = 'controller' AND m.from_agent IN (SELECT value FROM json_each(${ctl}))))`;
+
+/** The same test for a send's ring, past HOP_CEILING: the recipient's receipt (SELECT *: trust_at_send exists only after
+ *  migrate.mjs; without it, no message is a controller task), the switch and the list as they are now. */
+async function controllerTask(env: Env, msg: Message, agent: AgentRow): Promise<boolean> {
+  if (msg.hop_count > CONTROLLER_HOP_CEILING || msg.from === agent.id || !controllersOf(agent).includes(msg.from)) return false;
+  const rc = await env.DB.prepare("SELECT * FROM receipts WHERE workspace_id = ? AND message_id = ? AND agent = ?")
+    .bind(agent.workspace_id, msg.id, agent.id).first<{ trust_at_send?: string | null }>();
+  return rc?.trust_at_send === "controller" && (await delegationOn(env, agent.workspace_id));
+}
 
 const iso = (ms: number) => new Date(ms).toISOString();
 const token = () => Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(16).padStart(2, "0")).join("");
@@ -72,8 +92,9 @@ async function ringOne(env: Env, msg: Message, agentId: string): Promise<void> {
     .first<AgentRow>();
   if (!agent) return;
   const kind = agent.doorbell_kind;
-  // 1. Hop ceiling: deliver, never ring.
-  if (msg.hop_count > HOP_CEILING) return void (await logStmt(env, ws, agentId, kind, "hop_ceiling", [msg.id]).run());
+  // 1. Hop ceiling: deliver, never ring; a controller task rings up to CONTROLLER_HOP_CEILING (v0.5).
+  if (msg.hop_count > HOP_CEILING && !(await controllerTask(env, msg, agent)))
+    return void (await logStmt(env, ws, agentId, kind, "hop_ceiling", [msg.id]).run());
   // 2. Poll-only agent.
   const adapter = ADAPTERS[kind];
   if (kind === "none" || !agent.doorbell_url || !adapter) return void (await logStmt(env, ws, agentId, kind, "no_doorbell", [msg.id]).run());
@@ -183,13 +204,20 @@ async function afterClaim(
 ): Promise<void> {
   const ws = agent.workspace_id, agentId = agent.id, kind = agent.doorbell_kind;
   const log = (status: string, ids = logIds, http?: number, detail?: string) => logStmt(env, ws, agentId, kind, status, ids, http, detail);
-  // A re-ring rings only for mail inside the hop ceiling (a send's ring checked its own message above).
-  const unread = await env.DB.prepare(
-    `SELECT r.message_id AS id FROM receipts r JOIN messages m ON m.id = r.message_id
-     WHERE r.workspace_id = ?1 AND r.agent = ?2 AND r.read_at IS NULL
-       AND (m.expires_at IS NULL OR m.expires_at > ?3) AND (?4 = 0 OR m.hop_count <= ?5)
-     ORDER BY m.created_at LIMIT 100`,
-  ).bind(ws, agentId, iso(t), isRering ? 1 : 0, HOP_CEILING).all<{ id: string }>();
+  // A re-ring rings only for ringable mail (RINGABLE_SQL; a send's ring checked its own message above). Only a re-ring
+  // names trust_at_send: re-rings exist only on a migrated database, and a send's ring keeps working without it.
+  const unread = await (isRering
+    ? env.DB.prepare(
+        `SELECT r.message_id AS id FROM receipts r JOIN messages m ON m.id = r.message_id
+         WHERE r.workspace_id = ?1 AND r.agent = ?2 AND r.read_at IS NULL
+           AND (m.expires_at IS NULL OR m.expires_at > ?3) AND ${RINGABLE_SQL("?4", "?5")}
+         ORDER BY m.created_at LIMIT 100`,
+      ).bind(ws, agentId, iso(t), (await delegationOn(env, ws)) ? 1 : 0, JSON.stringify(controllersOf(agent)))
+    : env.DB.prepare(
+        `SELECT r.message_id AS id FROM receipts r JOIN messages m ON m.id = r.message_id
+         WHERE r.workspace_id = ?1 AND r.agent = ?2 AND r.read_at IS NULL AND (m.expires_at IS NULL OR m.expires_at > ?3)
+         ORDER BY m.created_at LIMIT 100`,
+      ).bind(ws, agentId, iso(t))).all<{ id: string }>();
   const ids = unread.results.map((r) => r.id);
   if (ids.length === 0) {
     // The agent drained between send and ring: release the lease, wake nobody. Every release below is guarded by
