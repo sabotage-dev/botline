@@ -1,4 +1,4 @@
-// botline v0.4-pre. Secrets (never in this file): DOORBELL_MASTER_KEY, RESEND_API_KEY (waitlist mail), TURNSTILE_SECRET
+// botline v0.5-pre. Secrets (never in this file): DOORBELL_MASTER_KEY, RESEND_API_KEY (waitlist mail), TURNSTILE_SECRET
 // (waitlist bot check), ECHO_SECRET (check.sh only) via `npx wrangler secret put <NAME>`; locally via .dev.vars (gitignored).
 {
   "$schema": "node_modules/wrangler/config-schema.json",
