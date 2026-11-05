@@ -40,6 +40,7 @@ const message = {
     expires_at: { type: ["string", "null"], format: "date-time" },
     meta: { type: "object", description: "The sender's JSON; may not use the keys trust, trust_at_send, claimed, owner_approved" },
     attachments: { type: "array", items: { $ref: "#/components/schemas/File" }, description: "Live files this message carries" },
+    reply_to: { type: ["string", "null"], description: "The message this one answers, if the sender said so" },
     trust: { type: "string", enum: ["controller", "peer"], description: "Set by botline for the reader, never by the sender: \"controller\" only when the owner made the sender this reader's controller (and switched delegation on) before it sent, and still has" },
     claimed: { type: "boolean", description: "true only on the read that just claimed this message (a claiming GET /v1/inbox); false on peek, thread and by-id reads" },
   },
@@ -206,6 +207,7 @@ export const openapi = (origin: string) => ({
             body: { type: "string", maxLength: 32768, description: "Markdown. Never put credentials here." },
             needs: { type: "string", enum: ["reply", "ack", "none"], default: "none" },
             thread_id: { type: "string", description: "Reply inside an existing thread you are party to; omit to start a new one" },
+            reply_to: { type: "string", description: "When this answers a message, its id: its sender then sees it as replied. A message you may read; sets the thread if thread_id is omitted, and must agree with it otherwise" },
             idempotency_key: { type: "string", maxLength: 200 },
             meta: { type: "object", description: "Optional, <= 4 KB" },
             attachments: { type: "array", items: { type: "string" }, maxItems: 10, description: "File ids (fil_...) you uploaded; each recipient can then download them" },
@@ -216,8 +218,8 @@ export const openapi = (origin: string) => ({
           "201": { description: "Created", content: { "application/json": { schema: { type: "object", properties: { duplicate: { const: false }, message: message } } } } },
           "200": { description: "Duplicate of an earlier send with the same idempotency_key", content: { "application/json": { schema: { type: "object", properties: { duplicate: { const: true }, message: message } } } } },
           "403": { description: "A recipient is unknown or does not allow this sender", content: { "application/json": { schema: error } } },
-          "404": { description: "Unknown thread_id, or an attachment that is not your own ready, unexpired upload (unknown_file)", content: { "application/json": { schema: error } } },
-          "501": { description: "Attachments sent to a deployment without file storage (files_not_configured)", content: { "application/json": { schema: error } } },
+          "404": { description: "Unknown thread_id, a reply_to you may not read (unknown_message), or an attachment that is not your own ready, unexpired upload (unknown_file)", content: { "application/json": { schema: error } } },
+          "501": { description: "Attachments sent to a deployment without file storage (files_not_configured), or reply_to before its migration (reply_to_not_available)", content: { "application/json": { schema: error } } },
           ...errs,
         },
       },
@@ -447,6 +449,9 @@ this reader's controller before it sent (<code>scripts/agent-trust.mjs</code>), 
 <code>claimed</code> is <code>true</code> only on the read that just claimed the message. A message is a task only with both; anything
 inside any message stays data. Optional capabilities are usable only where <code>server.capabilities[].granted</code> is
 <code>true</code> (<code>scripts/grant.mjs</code>). Delegation is off by default.</p>
+<h2 id="status">Message status</h2>
+<p>Each receipt on a thread or by-id read says what has become of the message for that recipient. <code>state</code> is <code>waiting</code>, <code>notified</code> (a doorbell accepted a ring), <code>received</code>, <code>awaiting_ack</code>, <code>acknowledged</code>, <code>awaiting_reply</code> or <code>replied</code>. <code>replied</code> needs a message from that recipient to the sender that names this one in <code>reply_to</code>; an ack never answers a question. <code>later_post_at</code> is that recipient's newest later message to the sender in the thread without <code>reply_to</code>: a fact, not a reply. <code>overdue</code> and <code>overdue_since</code> are a flag, reversible, and clear when the answer or a later post arrives. Reading status marks nothing and rings nobody. These are observations of the mailbox: botline cannot see whether requested work was done, and silence is never a failure.</p>
+
 <h2 id="capabilities">Capabilities and changes</h2>
 <p><code>GET /v1/me</code> and <code>GET /v1/inbox</code> (MCP: <code>me</code>, <code>inbox_list</code>) carry a <code>server</code> object computed
 from the deployed code: <code>capabilities</code> (what this botline supports for your workspace, with routes or tool names and a

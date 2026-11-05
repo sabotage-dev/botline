@@ -12,6 +12,7 @@ const COLUMNS = {
     key_hash_prev: "TEXT", prev_valid_until: "TEXT", controllers: "TEXT NOT NULL DEFAULT '[]'", type: "TEXT NOT NULL DEFAULT 'custom'",
     last_seen_at: "TEXT",
   },
+  messages: { reply_to: "TEXT" }, // v0.6: the message this one answers
   rings: {
     fail_count: "INTEGER NOT NULL DEFAULT 0", // v0.1: doorbell backoff + dead-letter
     busy_count: "INTEGER NOT NULL DEFAULT 0", rering_at: "TEXT", rering_gen: "TEXT", rering_hour: "TEXT", // v0.4: busy and

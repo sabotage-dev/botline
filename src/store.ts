@@ -2,6 +2,7 @@
 import { serverBlock, type ServerBlock, type Surface } from "./capabilities";
 import { doorbellState, ringRecipients, type RingJob } from "./doorbell";
 import * as files from "./files";
+import { deriveStatus, overdueAfter, replyFacts, type Post } from "./status";
 
 export interface Env {
   DB: D1Database; MCP_ALLOWED_ORIGINS?: string; ECHO_SECRET?: string;
@@ -15,6 +16,7 @@ export interface Env {
   FILE_MAX_MB?: string; FILE_MCP_MAX_KB?: string; WORKSPACE_FILE_QUOTA_MB?: string; WORKSPACE_FILE_MAX_COUNT?: string;
   FILE_UNATTACHED_HOURS?: string; // limits for files (src/files.ts limits())
   RERING?: Queue<RingJob>; // v0.4, optional: scheduled re-rings (busy doorbells, the end of a backoff); see src/doorbell.ts
+  STATUS_ACK_OVERDUE_MIN?: string; STATUS_REPLY_OVERDUE_MIN?: string; // v0.6: when an open ack or reply reads overdue (default 60)
 }
 
 export interface AgentRow {
@@ -30,7 +32,7 @@ export interface AgentRow {
 interface MessageRow {
   workspace_id: string; id: string; thread_id: string; hop_count: number; from_agent: string; to_agents: string;
   subject: string; body: string; needs: string; idempotency_key: string | null; created_at: string;
-  expires_at: string | null; meta: string | null;
+  expires_at: string | null; meta: string | null; reply_to?: string | null; // reply_to: missing before migrate
 }
 
 export interface Message {
@@ -38,6 +40,7 @@ export interface Message {
   subject: string; body: string; needs: string; created_at: string; expires_at: string | null;
   meta: Record<string, unknown>;
   attachments: files.FileInfo[]; // live files only; names only inside name_wrapped
+  reply_to: string | null; // v0.6: the message this one answers
 }
 
 export class ApiError extends Error {
@@ -190,7 +193,7 @@ export async function logEvent(env: Env, ws: string, agent: string, kind: string
 const toMessage = (r: MessageRow): Message => ({
   id: r.id, v: 1, workspace_id: r.workspace_id, thread_id: r.thread_id, hop_count: r.hop_count, from: r.from_agent,
   to: JSON.parse(r.to_agents), subject: r.subject, body: r.body, needs: r.needs, created_at: r.created_at,
-  expires_at: r.expires_at, meta: r.meta ? JSON.parse(r.meta) : {}, attachments: [],
+  expires_at: r.expires_at, meta: r.meta ? JSON.parse(r.meta) : {}, attachments: [], reply_to: r.reply_to ?? null,
 });
 
 /** Fill each message's live attachments (one query for the whole list). */
@@ -280,6 +283,7 @@ export async function send(env: Env, a: AgentRow, input: Args, defer: (p: Promis
   if (needs !== "reply" && needs !== "ack" && needs !== "none") bad("needs must be reply, ack or none");
   const key = str(input.idempotency_key, "idempotency_key", 200, false);
   let thread = str(input.thread_id, "thread_id", 64, false);
+  const replyTo = str(input.reply_to, "reply_to", 64, false);
   const given = input.hop_count ?? null;
   if (given !== null && (!Number.isInteger(given) || (given as number) < 0 || (given as number) > 1000)) bad("hop_count must be an integer 0-1000");
   const meta = isObj(input.meta) ? input.meta : input.meta == null ? {} : bad("meta must be an object");
@@ -316,6 +320,15 @@ export async function send(env: Env, a: AgentRow, input: Args, defer: (p: Promis
   const listed = rows.results.filter((r) => controllersOf(r).includes(a.id)).map((r) => r.id);
   const trusted = listed.length && !a.via_prev && (await delegationOn(env, ws)) ? new Set(listed) : new Set<string>();
 
+  // v0.6: the message this one answers fixes the thread. It must be one the caller may read, with the same 404 as reading
+  // it, so reply_to cannot probe for ids. The thread check below then still applies.
+  if (replyTo) {
+    const parent = await readable(env, a, replyTo);
+    if (!parent) throw new ApiError(404, "unknown_message", { message_id: replyTo });
+    if (thread && thread !== parent.thread_id) bad("reply_to is a message in another thread");
+    thread = parent.thread_id;
+  }
+
   // Thread + hop count. A sender may raise hop_count but never lower it below the thread's max + 1.
   let hop = (given as number | null) ?? 0;
   if (thread) {
@@ -330,12 +343,15 @@ export async function send(env: Env, a: AgentRow, input: Args, defer: (p: Promis
   } else thread = newId("thr");
 
   const id = newId("msg"), created = now(), expires = new Date(Date.now() + TTL_MS).toISOString();
+  // reply_to is named only when given, so a database before the v0.6 migrate keeps taking every other send.
   const [ins] = await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO messages (workspace_id, id, thread_id, hop_count, from_agent, to_agents, subject, body, needs,
-         idempotency_key, created_at, expires_at, meta) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${cond.sql}
+         idempotency_key, created_at, expires_at, meta${replyTo ? ", reply_to" : ""})
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${replyTo ? ", ?" : ""} WHERE ${cond.sql}
        ON CONFLICT (workspace_id, from_agent, idempotency_key) DO NOTHING`,
-    ).bind(ws, id, thread, hop, a.id, JSON.stringify(to), subject, body, needs, key, created, expires, JSON.stringify(meta), ...cond.binds),
+    ).bind(ws, id, thread, hop, a.id, JSON.stringify(to), subject, body, needs, key, created, expires, JSON.stringify(meta),
+      ...(replyTo ? [replyTo] : []), ...cond.binds),
     // One receipt per recipient, only if the message row was actually inserted (same transaction). Without a trusted
     // recipient the statement is v0.3's, so a database that has not run migrate.mjs keeps working.
     trusted.size
@@ -350,7 +366,10 @@ export async function send(env: Env, a: AgentRow, input: Args, defer: (p: Promis
         ).bind(ws, id, JSON.stringify(to)),
     // The message's files, in the same batch and conditional on the message row (an idempotent retry links nothing).
     ...(attachIds.length ? files.linkStatements(env, ws, id, attachIds, expires, at) : []),
-  ]);
+  ]).catch((e) => {
+    if (replyTo && /reply_to/.test(String(e))) throw new ApiError(501, "reply_to_not_available", { message: "this botline has not run migrate.mjs for v0.6: send without reply_to" });
+    throw e;
+  });
   if (ins.meta.changes === 0) {
     const prior = key ? await findPrior() : null; // lost a race on the same idempotency key
     if (prior) return { duplicate: true, message: await priorMessage(prior) };
@@ -359,7 +378,7 @@ export async function send(env: Env, a: AgentRow, input: Args, defer: (p: Promis
   }
   const message: Message = {
     id, v: 1, workspace_id: ws, thread_id: thread, hop_count: hop, from: a.id, to, subject, body, needs,
-    created_at: created, expires_at: expires, meta, attachments: [],
+    created_at: created, expires_at: expires, meta, attachments: [], reply_to: replyTo,
   };
   if (attachIds.length) message.attachments = (await files.attachmentsFor(env, ws, [id])).get(id) ?? [];
   defer(ringRecipients(env, message));
@@ -438,14 +457,30 @@ export async function ack(env: Env, a: AgentRow, input: Args) {
 
 type ReceiptRow = { message_id: string; agent: string; delivered_at: string | null; read_at: string | null; acked_at: string | null; trust_at_send?: string | null };
 
-/** Messages as a party sees them, with receipts: a sender sees every recipient's row, a recipient only its own. Marks
- *  nothing read and never touches the ring lease; `claimed` is always false here. */
+/** The posts of the threads of `rows` that asked for a reply: ids and addresses, no content. Nothing to fetch otherwise.
+ *  A database before the v0.6 migrate has no reply_to: every post is then a thread post. */
+export async function threadPosts(env: Env, ws: string, rows: { needs: string; thread_id: string }[]): Promise<Post[]> {
+  const threads = [...new Set(rows.filter((x) => x.needs === "reply").map((x) => x.thread_id))];
+  if (!threads.length) return [];
+  const q = (cols: string) => env.DB.prepare(`SELECT ${cols} FROM messages WHERE workspace_id = ? AND thread_id IN (SELECT value FROM json_each(?))`)
+    .bind(ws, JSON.stringify(threads)).all<Post>();
+  const base = "id, thread_id, from_agent, to_agents, created_at";
+  return (await q(`${base}, reply_to`).catch((e) => {
+    if (/no such column: reply_to/.test(String(e))) return q(base);
+    throw e;
+  })).results;
+}
+
+/** Messages as a party sees them, with receipts: a sender sees every recipient's row, a recipient only its own, each with
+ *  what has become of the message (src/status.ts). Marks nothing read and never touches the ring lease; `claimed` is always
+ *  false here. */
 async function partyView(env: Env, a: AgentRow, rows: MessageRow[]) {
   const deleg = await delegationOn(env, a.workspace_id);
   // SELECT *: trust_at_send exists only after migrate.mjs.
   const rc = await env.DB.prepare(
     `SELECT * FROM receipts WHERE workspace_id = ? AND message_id IN (SELECT value FROM json_each(?)) ORDER BY agent`,
   ).bind(a.workspace_id, JSON.stringify(rows.map((x) => x.id))).all<ReceiptRow>();
+  const posts = await threadPosts(env, a.workspace_id, rows), after = overdueAfter(env), t = Date.now();
   const enriched = new Map((await withAttachments(env, a.workspace_id, rows.map(toMessage))).map((m) => [m.id, m]));
   return rows.map((x) => {
     const m = enriched.get(x.id)!, own = rc.results.find((y) => y.message_id === x.id && y.agent === a.id);
@@ -453,7 +488,15 @@ async function partyView(env: Env, a: AgentRow, rows: MessageRow[]) {
       ...view(m, trustFor(a, m.from, own, deleg), false),
       receipts: rc.results
         .filter((y) => y.message_id === x.id && (x.from_agent === a.id || y.agent === a.id))
-        .map((y) => ({ agent: y.agent, delivered_at: y.delivered_at, read_at: y.read_at, acked_at: y.acked_at })),
+        .map((y) => {
+          const f = replyFacts(x, y.agent, posts);
+          return {
+            agent: y.agent, delivered_at: y.delivered_at, read_at: y.read_at, acked_at: y.acked_at,
+            ...deriveStatus({ needs: x.needs, created_at: x.created_at, delivered_at: y.delivered_at, read_at: y.read_at,
+              acked_at: y.acked_at, replied_at: f.reply?.at ?? null, later_post_at: f.later_post_at }, after, t),
+            reply: f.reply, later_post_at: f.later_post_at,
+          };
+        }),
     };
   });
 }
@@ -469,14 +512,16 @@ export async function thread(env: Env, a: AgentRow, threadId: unknown) {
   return { notice: NOTICE, thread_id: tid, messages: await partyView(env, a, r.results) };
 }
 
-/** v0.4 by-id read (GET /v1/message/{id}, MCP thread_get {message_id}): the sender or a recipient, in the caller's own
- *  workspace, unexpired; anyone else 404. Marks nothing. */
+/** A message the caller may read: the sender or a recipient, in the caller's own workspace, unexpired. */
+const readable = (env: Env, a: AgentRow, id: string) => env.DB.prepare(
+  `SELECT * FROM messages m WHERE m.workspace_id = ?1 AND m.id = ?3 AND (m.expires_at IS NULL OR m.expires_at > ?4)
+   AND (m.from_agent = ?2 OR EXISTS (SELECT 1 FROM receipts r WHERE r.workspace_id = ?1 AND r.message_id = m.id AND r.agent = ?2))`,
+).bind(a.workspace_id, a.id, id, now()).first<MessageRow>();
+
+/** v0.4 by-id read (GET /v1/message/{id}, MCP thread_get {message_id}): readable() or 404. Marks nothing. */
 export async function messageById(env: Env, a: AgentRow, messageId: unknown) {
   const mid = str(messageId, "message_id", 64, true)!;
-  const r = await env.DB.prepare(
-    `SELECT * FROM messages m WHERE m.workspace_id = ?1 AND m.id = ?3 AND (m.expires_at IS NULL OR m.expires_at > ?4)
-     AND (m.from_agent = ?2 OR EXISTS (SELECT 1 FROM receipts r WHERE r.workspace_id = ?1 AND r.message_id = m.id AND r.agent = ?2))`,
-  ).bind(a.workspace_id, a.id, mid, now()).first<MessageRow>();
+  const r = await readable(env, a, mid);
   if (!r) throw new ApiError(404, "unknown_message", { message_id: mid });
   return { notice: NOTICE, message: (await partyView(env, a, [r]))[0] };
 }

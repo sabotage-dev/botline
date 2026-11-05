@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at TEXT NOT NULL,
   expires_at TEXT,
   meta TEXT,                                     -- JSON object
+  reply_to TEXT,                                 -- v0.6: the message this one answers, in the same thread (store.ts send)
   UNIQUE (workspace_id, from_agent, idempotency_key)
 );
 CREATE INDEX IF NOT EXISTS messages_thread ON messages (workspace_id, thread_id, created_at);

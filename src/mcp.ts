@@ -59,6 +59,7 @@ const TOOLS = [
         body: str("Markdown body (<= 32768 chars). Never put credentials in a body."),
         needs: { type: "string", enum: ["reply", "ack", "none"], description: "What you expect back (default none)" },
         thread_id: str("Reply within an existing thread (thr_...); omit to start a new thread"),
+        reply_to: str("When this answers a message, its id (msg_...): the sender then sees it as replied. Sets the thread if thread_id is omitted"),
         idempotency_key: str("Unique per logical send; a repeat returns the original message with duplicate:true"),
         hop_count: { type: "integer", minimum: 0, description: "Optional; defaults to the thread's max hop + 1" },
         meta: { type: "object", description: "Optional small JSON object (<= 4 KB)" },
@@ -96,7 +97,9 @@ const TOOLS = [
     name: "thread_get",
     description: "Get the messages in a thread that you sent or received (thread_id), or one message by id (message_id), " +
       "without marking anything read. Each message carries trust and claimed: false, and receipts: every recipient's for " +
-      "messages you sent, only your own for messages you received.",
+      "messages you sent, only your own for messages you received. A receipt says what has become of the message: state " +
+      "(waiting, notified, received, awaiting_ack, acknowledged, awaiting_reply, replied), overdue, reply and later_post_at. " +
+      "These are observations: acknowledged does not mean the work was done, and overdue does not mean it failed.",
     inputSchema: {
       type: "object",
       properties: { thread_id: str("Thread id (thr_...)"), message_id: str("Message id (msg_...): get just that message") },

@@ -61,7 +61,7 @@ FIDS=(); QB=""; QF="" # FIDS: files this run uploaded (expired on exit); QB/QF: 
 SEEN0=""; WSN0=""; WSF0=""; OWS=""; RENAMED="" # section 13: saved capability state, the second workspace, renamed tables
 GR0=""; CTL0=""; DEL0=""; CID=""; OWS2="" # section 12/14: saved grants, controllers, delegation; throwaway agent and workspace
 TY0=""; SIG0=""; OWS3=""; NT=""; RCOL="" # section 15: saved types and watch URLs, third workspace, throwaway agent, renamed column
-LSCOL=""; TRG="" # section 16: a renamed agents.last_seen_at, a planted trigger
+LSCOL=""; TRG=""; RM="" # sections 16-17: a renamed agents.last_seen_at, a planted trigger, a renamed messages.reply_to
 cleanup() {
   local w=() m
   (cd "$ROOT" && node scripts/doorbell-set.mjs muse none - "$MODE" >/dev/null 2>&1) \
@@ -75,6 +75,7 @@ cleanup() {
       fi
     done
   fi
+  if [[ -n $RM ]]; then d1 "ALTER TABLE messages RENAME COLUMN reply_to_chk TO reply_to" || w+=("messages.reply_to_chk was not renamed back to reply_to"); fi
   if [[ -n $TRG ]]; then d1 "DROP TRIGGER IF EXISTS chk_no_ok" || w+=("trigger chk_no_ok was not dropped"); fi
   if [[ -n $LSCOL ]]; then
     d1 "ALTER TABLE agents RENAME COLUMN last_seen_chk TO last_seen_at" || w+=("agents.last_seen_chk was not renamed back to last_seen_at")
@@ -1224,7 +1225,82 @@ else
   echo "note: $R16_NOTE" >&2
 fi
 
-# 17. Table
+# 17. Message status and reply_to (v0.6, docs/plan-v0.6.md T3). Sender claude, recipients grokbot and muse (no doorbell here).
+#     Elapsed time is simulated by moving read_at back.
+sndm() { call POST /v1/send "$1" "$2"; MID=$(j .message.id); TH=$(j .message.thread_id); } # KEY JSON -> sets MID, TH (and STATUS, BODY)
+rcpt() { call GET "/v1/message/$1" "$2" ""; j "[.message.receipts[] | select(.agent == \"$3\")][0] | $4"; } # ID KEY AGENT JQ
+ST='"\(.state) \(.overdue)"'
+back() { d1 "UPDATE receipts SET read_at = '$(python3 -c "import datetime; print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(hours=2)).strftime('%Y-%m-%dT%H:%M:%S.000Z'))")' WHERE message_id = '$1' AND agent = '$2'"; }
+call GET '/v1/inbox?unread=1' "$KG" ""; call GET '/v1/inbox?unread=1' "$KM" ""
+sndm "$KC" '{"to":["grokbot"],"subject":"s17 ack","body":"x","needs":"ack"}'; A=$MID
+a=$(rcpt "$A" "$KC" grokbot "$ST"); b=$(d1q "SELECT read_at IS NULL AS u FROM receipts WHERE message_id = '$A'" .u)
+call GET '/v1/inbox?unread=1' "$KG" ""
+row "17a needs ack: waiting, unread after that read (status claims nothing); then read: awaiting_ack" "waiting false 1 awaiting_ack false" "$a $b $(rcpt "$A" "$KC" grokbot "$ST")"
+back "$A" grokbot; a=$(rcpt "$A" "$KC" grokbot '"\(.state) \(.overdue) \(.overdue_since != null)"')
+call POST /v1/ack "$KG" "{\"id\":\"$A\"}"; t1=$(j .acked_at); sleep 1; call POST /v1/ack "$KG" "{\"id\":\"$A\"}"; t2=$(j .acked_at)
+row "17b overdue is a flag, not a failure, and it clears: read 2 h ago, no ack: awaiting_ack true; acked: acknowledged false; a second ack changes nothing" \
+  "awaiting_ack true true acknowledged false null same" "$a $(rcpt "$A" "$KC" grokbot "$ST") $(rcpt "$A" "$KC" grokbot .overdue_since) $([[ $t1 == "$t2" ]] && echo same || echo moved)"
+
+sndm "$KC" '{"to":["grokbot"],"subject":"s17 a","body":"x","needs":"reply"}'; A=$MID
+sndm "$KC" "{\"to\":[\"grokbot\"],\"subject\":\"s17 b\",\"body\":\"x\",\"needs\":\"reply\",\"thread_id\":\"$TH\"}"; B=$MID
+call GET '/v1/inbox?unread=1' "$KG" ""
+sndm "$KG" "{\"to\":[\"claude\"],\"subject\":\"s17 re\",\"body\":\"x\",\"reply_to\":\"$A\"}"; R=$MID; a="$STATUS $(j .message.thread_id | sed "s/$TH/same-thread/") $(j .message.reply_to | sed "s/$A/A/")"
+row "17c reply_to A, no thread_id: joins A's thread; A is replied, B in the same thread is not, and a reply_to post is not a later post" \
+  "201 same-thread A replied false yes awaiting_reply false null" "$a $(rcpt "$A" "$KC" grokbot "$ST") $([[ $(rcpt "$A" "$KC" grokbot .reply.id) == "$R" ]] && echo yes || echo no) $(rcpt "$B" "$KC" grokbot "$ST") $(rcpt "$B" "$KC" grokbot .later_post_at)"
+
+sndm "$KC" '{"to":["grokbot","muse"],"subject":"s17 multi","body":"x","needs":"ack"}'; A=$MID
+call GET '/v1/inbox?unread=1' "$KG" ""; call GET '/v1/inbox?unread=1' "$KM" ""; call POST /v1/ack "$KG" "{\"id\":\"$A\"}"
+call GET "/v1/message/$A" "$KM" ""; b=$(j '[.message.receipts[].agent] | join(",")')
+row "17d two recipients: one ack is that recipient's alone; a recipient sees only its own row, the sender both" \
+  "acknowledged awaiting_ack muse grokbot,muse" "$(rcpt "$A" "$KC" grokbot .state) $(rcpt "$A" "$KC" muse .state) $b $(call GET "/v1/message/$A" "$KC" ""; j '[.message.receipts[].agent] | join(",")')"
+
+sndm "$KC" '{"to":["grokbot"],"subject":"s17 legacy","body":"x","needs":"reply"}'; A=$MID
+call GET '/v1/inbox?unread=1' "$KG" ""; back "$A" grokbot; a=$(rcpt "$A" "$KC" grokbot "$ST")
+call POST /v1/ack "$KG" "{\"id\":\"$A\"}"; b=$(rcpt "$A" "$KC" grokbot "$ST")
+call POST /v1/send "$KG" "{\"to\":[\"claude\"],\"subject\":\"s17 old client\",\"body\":\"x\",\"thread_id\":\"$TH\"}"; c=$STATUS
+row "17e an ack does not answer a question: acked, no reply: awaiting_reply, overdue. An old client's post (no reply_to) never makes it replied, but clears overdue" \
+  "awaiting_reply true awaiting_reply true 201 awaiting_reply false set" "$a $b $c $(rcpt "$A" "$KC" grokbot "$ST") $([[ $(rcpt "$A" "$KC" grokbot .later_post_at) =~ ^20 ]] && echo set || echo none)"
+
+sndm "$KC" '{"to":["grokbot"],"subject":"s17 q","body":"x","needs":"reply"}'; A=$MID
+call GET '/v1/inbox?unread=1' "$KG" ""
+call POST /v1/send "$KG" "{\"to\":[\"muse\"],\"subject\":\"s17 aside\",\"body\":\"x\",\"reply_to\":\"$A\"}"; a=$STATUS; call GET '/v1/inbox?unread=1' "$KM" ""
+call POST /v1/send "$KG" "{\"to\":[\"muse\"],\"subject\":\"s17 aside 2\",\"body\":\"x\",\"thread_id\":\"$(d1q "SELECT thread_id AS t FROM messages WHERE id = '$A'" .t)\"}"; call GET '/v1/inbox?unread=1' "$KM" ""
+row "17f a reply or a later post addressed to someone else is not an answer to the sender, and the sender learns nothing of it" \
+  "201 awaiting_reply false null null" "$a $(rcpt "$A" "$KC" grokbot "$ST") $(rcpt "$A" "$KC" grokbot .reply) $(rcpt "$A" "$KC" grokbot .later_post_at)"
+
+sndm "$KC" '{"to":["grokbot"],"subject":"s17 private","body":"x"}'; Z=$MID; OTH=$(d1q "SELECT thread_id AS t FROM messages WHERE id = '$Z'" .t)
+call POST /v1/send "$KM" '{"to":["claude"],"subject":"p","body":"x","reply_to":"msg_doesnotexist"}'; a="$STATUS $(j .error)"
+call POST /v1/send "$KM" "{\"to\":[\"claude\"],\"subject\":\"p\",\"body\":\"x\",\"reply_to\":\"$Z\"}"; b="$STATUS $(j .error)"
+sndm "$KC" '{"to":["grokbot"],"subject":"s17 t","body":"x"}'; A=$MID
+call POST /v1/send "$KG" "{\"to\":[\"claude\"],\"subject\":\"p\",\"body\":\"x\",\"reply_to\":\"$A\",\"thread_id\":\"$OTH\"}"; c="$STATUS $(j .error)"
+call GET '/v1/inbox?unread=1' "$KG" ""
+row "17g reply_to: unknown id and a message the caller is no party to are the same 404; a different thread_id is 400" \
+  "404 unknown_message / 404 unknown_message / 400 bad_request" "$a / $b / $c"
+
+n0=$(d1q "SELECT COUNT(*) AS n FROM ring_log WHERE workspace_id = 'default'" .n)
+sndm "$KC" '{"to":["muse"],"subject":"s17 lookup","body":"x","needs":"reply"}'; A=$MID; n1=$(d1q "SELECT COUNT(*) AS n FROM ring_log WHERE workspace_id = 'default'" .n)
+for k in "$KC" "$KM"; do call GET "/v1/message/$A" "$k" ""; call GET "/v1/thread/$(j .message.thread_id)" "$k" ""; done
+row "17h status reads by sender and recipient: still unread, nothing more in the ring log" "1 0" \
+  "$(d1q "SELECT read_at IS NULL AS u FROM receipts WHERE message_id = '$A'" .u) $(( $(d1q "SELECT COUNT(*) AS n FROM ring_log WHERE workspace_id = 'default'" .n) - n1 ))"
+call GET '/v1/inbox?unread=1' "$KM" ""
+mcp "$KM" "{\"jsonrpc\":\"2.0\",\"id\":171,\"method\":\"tools/call\",\"params\":{$modern_meta,\"name\":\"message_send\",\"arguments\":{\"to\":[\"claude\"],\"subject\":\"s17 mcp\",\"body\":\"x\",\"reply_to\":\"$A\"}}}"; a=$(tool .message.reply_to | sed "s/$A/A/")
+mcp "$KC" "{\"jsonrpc\":\"2.0\",\"id\":172,\"method\":\"tools/call\",\"params\":{$modern_meta,\"name\":\"thread_get\",\"arguments\":{\"message_id\":\"$A\"}}}"
+row "17i MCP matches REST: message_send takes reply_to, thread_get's receipts carry the state" "A replied" "$a $(tool '.message.receipts[0].state')"
+sndm "$KC" '{"to":["grokbot"],"subject":"s17 none","body":"x"}'; A=$MID; a=$(rcpt "$A" "$KC" grokbot "$ST"); call GET '/v1/inbox?unread=1' "$KG" ""
+back "$A" grokbot; b=$(rcpt "$A" "$KC" grokbot "$ST")
+row "17j needs none: waiting, then received, and never overdue" "waiting false received false" "$a $b"
+call GET '/v1/inbox?unread=1' "$KC" ""
+if [[ $MODE == --local ]]; then
+  sndm "$KC" '{"to":["grokbot"],"subject":"s17 um","body":"x","needs":"reply"}'; A=$MID; RM=1
+  d1 "ALTER TABLE messages RENAME COLUMN reply_to TO reply_to_chk"
+  call POST /v1/send "$KG" '{"to":["claude"],"subject":"s17 um2","body":"x"}'; a=$STATUS
+  call POST /v1/send "$KG" "{\"to\":[\"claude\"],\"subject\":\"s17 um3\",\"body\":\"x\",\"reply_to\":\"$A\"}"; b="$STATUS $(j .error)"
+  c="$(rcpt "$A" "$KC" grokbot .state)"; d1 "ALTER TABLE messages RENAME COLUMN reply_to_chk TO reply_to"; RM=""
+  row "17k before the v0.6 migrate (no messages.reply_to): sends still work, reply_to is a clear 501, status reads still answer" "201 501 reply_to_not_available waiting" "$a $b $c"
+  call GET '/v1/inbox?unread=1' "$KG" ""; call GET '/v1/inbox?unread=1' "$KC" ""
+fi
+
+# 18. Table
 echo "| step | expected | actual | result |"
 echo "|---|---|---|---|"
 printf '%s\n' "${ROWS[@]}"

@@ -57,6 +57,14 @@
       "kind": "endpoint",
       "summary": "Watch URL (v0.5): an owner-minted GET /v1/signal?token=… reports an agent's unread count and newest time without a key; it marks nothing read.",
       "docs": "/docs#signal"
+    },
+    {
+      "rev": 6,
+      "date": "2026-11-04",
+      "capability": "messages",
+      "kind": "field",
+      "summary": "Message status (v0.6): a send may name the message it answers in reply_to; receipts on thread and by-id reads carry state, overdue, reply and later_post_at.",
+      "docs": "/docs#status"
     }
   ]
 }

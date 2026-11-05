@@ -58,6 +58,9 @@
     "FILE_MCP_MAX_KB": "256",
     "WORKSPACE_FILE_QUOTA_MB": "1024",
     "WORKSPACE_FILE_MAX_COUNT": "1000",
-    "FILE_UNATTACHED_HOURS": "24"
+    "FILE_UNATTACHED_HOURS": "24",
+    // Minutes after which an open ack or reply reads overdue (src/status.ts). A flag on a receipt, nothing acts on it.
+    "STATUS_ACK_OVERDUE_MIN": "60",
+    "STATUS_REPLY_OVERDUE_MIN": "60"
   }
 }
