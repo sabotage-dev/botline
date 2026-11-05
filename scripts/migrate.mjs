@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Usage: node scripts/migrate.mjs [--local|--remote]
+// Usage: node scripts/migrate.mjs [--check] [--local|--remote]
+// --check changes nothing: it exits 1 and names what a deploy of this code would find missing.
 // Brings an existing database up to schema.sql. SQLite has no ADD COLUMN IF NOT EXISTS, so this reads
 // PRAGMA table_info and adds only the missing columns. Additive only; a no-op on a fresh schema.sql install.
 // New TABLES come from re-running schema.sql (safe to re-run); this script names any that are still missing.
@@ -20,8 +21,9 @@ const COLUMNS = {
   workspaces: { delegation: "INTEGER NOT NULL DEFAULT 0" }, // v0.4: the owner's delegation switch (table from v0.3 schema.sql)
 };
 
-const { pos, mode } = parseArgs(process.argv.slice(2));
-if (pos.length) die("usage: migrate.mjs [--local|--remote]");
+const argv = process.argv.slice(2), check = argv.includes("--check");
+const { pos, mode } = parseArgs(argv.filter((a) => a !== "--check"));
+if (pos.length) die("usage: migrate.mjs [--check] [--local|--remote]");
 const add = [];
 for (const [table, cols] of Object.entries(COLUMNS)) {
   const out = runQuery(`PRAGMA table_info(${table});`, mode);
@@ -30,8 +32,13 @@ for (const [table, cols] of Object.entries(COLUMNS)) {
   for (const [col, type] of Object.entries(cols))
     if (!have.includes(col)) add.push(`ALTER TABLE ${table} ADD COLUMN ${col} ${type};`);
 }
-if (add.length) runSql(add.join("\n"), mode);
-console.error(add.length ? `applied (${mode.slice(2)}):\n${add.join("\n")}` : `columns up to date (${mode.slice(2)})`);
+if (check) {
+  if (add.length) { console.error(`missing column(s) (${mode.slice(2)}):\n${add.join("\n")}\nrun: node scripts/migrate.mjs ${mode}`); process.exitCode = 1; }
+  else console.error(`columns up to date (${mode.slice(2)})`);
+} else {
+  if (add.length) runSql(add.join("\n"), mode);
+  console.error(add.length ? `applied (${mode.slice(2)}):\n${add.join("\n")}` : `columns up to date (${mode.slice(2)})`);
+}
 
 const want = [...readFileSync(new URL("../schema.sql", import.meta.url), "utf8").matchAll(/CREATE TABLE IF NOT EXISTS (\w+)/g)].map((m) => m[1]);
 const tables = runQuery("SELECT name FROM sqlite_master WHERE type = 'table';", mode);

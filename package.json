@@ -8,6 +8,8 @@
   "scripts": {
     "dev": "wrangler dev --local --port 8787",
     "typecheck": "tsc --noEmit",
+    "check": "scripts/ci.sh",
+    "check:quick": "scripts/ci.sh --quick",
     "db:local": "wrangler d1 execute botline-spike --local --file schema.sql",
     "deploy": "wrangler deploy"
   },
