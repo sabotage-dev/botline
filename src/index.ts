@@ -1,7 +1,7 @@
 // botline router + auth. REST under /v1, MCP at POST /mcp. Workspace is always 'default' in Phase 1
 // (it comes from the authenticated agent row, so every query is already scoped through it).
 import { markSeen } from "./capabilities";
-import { rering, type RingJob } from "./doorbell";
+import { reconcile, RECONCILE_CRON, rering, type RingJob } from "./doorbell";
 import { handleMcp, rpcError } from "./mcp";
 import { docsHtml, openapi } from "./openapi";
 import { signal } from "./signal";
@@ -69,7 +69,9 @@ async function route(req: Request, env: Env, ctx: ExecutionContext): Promise<Res
     if (origin && origin !== url.origin && !extra.includes(origin))
       return rpcError(null, -32600, `Forbidden origin: ${origin}`, 403);
     const me = await store.authenticate(env, req);
-    return me ? handleMcp(req, env, ctx, me) : unauthorized();
+    if (!me) return unauthorized();
+    ctx.waitUntil(store.touch(env, me));
+    return handleMcp(req, env, ctx, me);
   }
 
   // Test doorbell target for check.sh: exists only when ECHO_SECRET is set, and records only rings carrying it.
@@ -93,6 +95,7 @@ async function route(req: Request, env: Env, ctx: ExecutionContext): Promise<Res
 
   const me = await store.authenticate(env, req);
   if (!me) return unauthorized();
+  ctx.waitUntil(store.touch(env, me));
 
   switch (`${method} ${path}`) {
     case "GET /v1/me":
@@ -152,9 +155,12 @@ export default {
       return json({ error: "internal_error" }, 500);
     }
   },
-  // Daily Cron Trigger (wrangler.jsonc "triggers"): delete expired and abandoned files in bounded passes.
-  async scheduled(_event, env, ctx) {
-    ctx.waitUntil(files.sweep(env).then((r) => { if (r.deleted) console.log("files swept", r.deleted); }));
+  // Cron Triggers (wrangler.jsonc "triggers"). Every minute: recover lost wake-ups. Otherwise (the daily trigger): delete
+  // expired and abandoned files in bounded passes. Awaited, not waitUntil: that is cut at 30 s, this handler has 15 minutes.
+  async scheduled(controller, env) {
+    if (controller.cron === RECONCILE_CRON) return void (await reconcile(env));
+    const r = await files.sweep(env);
+    if (r.deleted) console.log("files swept", r.deleted);
   },
   // v0.4: the optional RERING Queue's consumer. Each message is one scheduled re-ring; a stale token does nothing.
   async queue(batch, env) {

@@ -40,6 +40,8 @@
 #      its saved state. It saves the three agents' types and watch URLs and restores them on exit; it adds a throwaway
 #      agent (chk-type-*) and a third workspace and deletes them on exit. Rows 15j-15k rename a table and a column
 #      (--local only).
+#      Section 16 (v0.6: the reconciler) fires `/__scheduled?cron=* * * * *` itself, so it needs `wrangler dev --test-scheduled`,
+#      and it plants mail and rewrites ring state with SQL, so it runs only with --local (skipped otherwise; the summary says so).
 #      Cleanup failures are printed as `warning: cleanup: …` lines on stderr.
 # Requires curl, jq, python3. Prints a markdown table; exits 1 if any step fails. Never prints a key.
 set -uo pipefail
@@ -59,6 +61,7 @@ FIDS=(); QB=""; QF="" # FIDS: files this run uploaded (expired on exit); QB/QF: 
 SEEN0=""; WSN0=""; WSF0=""; OWS=""; RENAMED="" # section 13: saved capability state, the second workspace, renamed tables
 GR0=""; CTL0=""; DEL0=""; CID=""; OWS2="" # section 12/14: saved grants, controllers, delegation; throwaway agent and workspace
 TY0=""; SIG0=""; OWS3=""; NT=""; RCOL="" # section 15: saved types and watch URLs, third workspace, throwaway agent, renamed column
+LSCOL=""; TRG="" # section 16: a renamed agents.last_seen_at, a planted trigger
 cleanup() {
   local w=() m
   (cd "$ROOT" && node scripts/doorbell-set.mjs muse none - "$MODE" >/dev/null 2>&1) \
@@ -71,6 +74,10 @@ cleanup() {
         d1 "DROP TABLE IF EXISTS $t" && d1 "ALTER TABLE ${t}_chk RENAME TO $t" || w+=("table ${t}_chk was not renamed back to $t")
       fi
     done
+  fi
+  if [[ -n $TRG ]]; then d1 "DROP TRIGGER IF EXISTS chk_no_ok" || w+=("trigger chk_no_ok was not dropped"); fi
+  if [[ -n $LSCOL ]]; then
+    d1 "ALTER TABLE agents RENAME COLUMN last_seen_chk TO last_seen_at" || w+=("agents.last_seen_chk was not renamed back to last_seen_at")
   fi
   if [[ -n $RCOL ]]; then # a 15k column rename did not finish
     d1 "ALTER TABLE receipts RENAME COLUMN trust_at_send_chk TO trust_at_send" || w+=("receipts.trust_at_send_chk was not renamed back to trust_at_send")
@@ -1094,10 +1101,133 @@ call GET '/v1/inbox?unread=1' "$KM" ""; setctl muse '[]'
 
 fi # section 14 gate
 
-# 16. Table
+# 16. The reconciler (v0.6, docs/plan-v0.6.md T2). Every row plants the state a failure would leave, with SQL, then fires the
+#     Cron handler. Muse's doorbell rings <base>/v1/_echo; "rings" counts echo hits. Nothing here calls the API with muse's key
+#     unless the row is about what muse did, because any keyed call moves agents.last_seen_at.
+R16_NOTE="reconciler rows: skipped (needs --local and wrangler dev --test-scheduled)"
+TICK="$BASE/__scheduled?cron=*+*+*+*+*"
+if [[ $MODE == --local && $(curl -s -o /dev/null -w '%{http_code}' "$TICK") == 200 ]]; then
+  R16_NOTE="reconciler rows: ran"
+  FUT=2999-01-01T00:00:00.000Z; L16=0
+  tick() { curl -s -o /dev/null -w '%{http_code}' "$TICK"; }
+  dset() { (cd "$ROOT" && node scripts/doorbell-set.mjs muse "$1" "${2:--}" ${3:+"$3"} "$MODE" >/dev/null 2>&1); }
+  stamp() { python3 -c "import datetime,sys; print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=int(sys.argv[1]))).strftime('%Y-%m-%dT%H:%M:%S.000Z'))" "$1"; }
+  hits() { call GET /v1/_echo/hits "$KC" ""; j .count; }
+  # lost [hop] [created] [expires] [trust]: mail committed for muse whose ring never happened. Sets LOST (its id).
+  lost() {
+    local hop=${1:-0} at=${2:-$(stamp 0)} ex=${3:-$FUT} tr=NULL; [[ -n ${4:-} ]] && tr="'$4'"
+    L16=$((L16 + 1)); LOST="msg_lost$(now_ms)$L16"
+    d1 "INSERT INTO messages (workspace_id, id, thread_id, hop_count, from_agent, to_agents, subject, body, needs, created_at, expires_at, meta) VALUES ('default', '$LOST', 'thr_$LOST', $hop, 'claude', '[\"muse\"]', 'lost', 'x', 'none', '$at', '$ex', '{}')"
+    d1 "INSERT INTO receipts (workspace_id, message_id, agent, trust_at_send) VALUES ('default', '$LOST', 'muse', $tr)"
+  }
+  fresh16() { # nothing unread, no lease, no failure, no re-ring, muse not seen, no earlier accepted rings to count
+    d1 "UPDATE receipts SET read_at = '$PAST' WHERE workspace_id = 'default' AND agent = 'muse' AND read_at IS NULL"
+    d1 "UPDATE rings SET in_flight_since = NULL, lease_until = NULL, fail_count = 0, busy_count = 0, rering_at = NULL, rering_gen = NULL, rering_hour = NULL, rering_count = 0 WHERE workspace_id = 'default' AND agent = 'muse'"
+    d1 "UPDATE agents SET last_seen_at = NULL WHERE workspace_id = 'default' AND id = 'muse'"
+    d1 "DELETE FROM ring_log WHERE workspace_id = 'default' AND agent = 'muse'"
+  }
+  lastring() { d1q "SELECT status, detail, json_array_length(message_ids) AS n FROM ring_log WHERE workspace_id = 'default' AND agent = 'muse' ORDER BY id DESC LIMIT 1" '"\(.status) \(.detail) \(.n)"'; }
+  logn() { d1q "SELECT COUNT(*) AS n FROM ring_log WHERE workspace_id = 'default' AND agent = 'muse'" .n; }
+  ringst() { d1q "SELECT in_flight_since IS NOT NULL AS f, lease_until, fail_count, rering_gen FROM rings WHERE workspace_id = 'default' AND agent = 'muse'" "$1"; }
+  expire() { d1 "UPDATE rings SET lease_until = '$PAST' WHERE workspace_id = 'default' AND agent = 'muse'"; }
+
+  dset generic_webhook "$BASE/v1/_echo" "${ECHO_SECRET:-check-secret}"; fresh16
+  lost; id=$LOST; E0=$(hits); a=$(tick); sleep 1
+  row "16a a committed message whose ring was lost: the next tick rings once, through the reconciler, and the doorbell's 2xx is recorded" \
+    "200 1 ok reconcile 1 set" "$a $(( $(hits) - E0 )) $(lastring) $(d1q "SELECT delivered_at IS NOT NULL AS d FROM receipts WHERE message_id = '$id'" 'if .d == 1 then "set" else "unset" end')"
+  E0=$(hits); tick >/dev/null; sleep 1
+  row "16b the same mail one tick later: the 2xx's lease holds, no ring" "0" "$(( $(hits) - E0 ))"
+
+  fresh16; lost; E0=$(hits); (tick >/dev/null & tick >/dev/null & wait); sleep 1
+  row "16c two reconcilers at once: one ring; the loser logs coalesced (or sees the lease and logs nothing)" "1" "$(( $(hits) - E0 ))"
+
+  fresh16; lost; d1 "UPDATE receipts SET read_at = '$(stamp 0)' WHERE message_id = '$LOST'"; E0=$(hits); n0=$(logn); tick >/dev/null; sleep 1
+  row "16d the recipient read before the tick: no ring, no log row" "0 0" "$(( $(hits) - E0 )) $(( $(logn) - n0 ))"
+
+  fresh16; lost; lost; lost; E0=$(hits); tick >/dev/null; sleep 1
+  row "16e three unread messages: one ring naming all three" "1 ok reconcile 3" "$(( $(hits) - E0 )) $(lastring)"
+
+  fresh16; lost; d1 "UPDATE rings SET fail_count = 2, lease_until = '$(stamp 600)' WHERE workspace_id = 'default' AND agent = 'muse'"
+  E0=$(hits); n0=$(logn); tick >/dev/null; sleep 1; a="$(( $(hits) - E0 )) $(( $(logn) - n0 ))"
+  expire; E0=$(hits); tick >/dev/null; sleep 1
+  row "16f inside a backoff: no ring, no log row; once it ends the tick rings and the 2xx clears fail_count" "0 0 1 0" "$a $(( $(hits) - E0 )) $(ringst .fail_count)"
+
+  fresh16; old=$(stamp -259200); lost 0 "$old"; d1 "UPDATE rings SET fail_count = 5 WHERE workspace_id = 'default' AND agent = 'muse'"
+  E0=$(hits); n0=$(logn); tick >/dev/null; sleep 1; a="$(( $(hits) - E0 )) $(( $(logn) - n0 ))"
+  dset generic_webhook "$BASE/v1/_echo" "${ECHO_SECRET:-check-secret}"; E0=$(hits); tick >/dev/null; sleep 1
+  row "16g dead-lettered: no ring and no log row, however long it waits; doorbell-set fixes it and the 3-day-old mail rings on the next tick" "0 0 1" "$a $(( $(hits) - E0 ))"
+
+  fresh16; lost; dset none; E0=$(hits); n0=$(logn); tick >/dev/null; sleep 1
+  row "16h a poll-only agent: no ring, no log row" "0 0" "$(( $(hits) - E0 )) $(( $(logn) - n0 ))"
+  dset generic_webhook "$BASE/v1/_echo" "${ECHO_SECRET:-check-secret}"
+
+  fresh16; lost 9; E0=$(hits); n0=$(logn); tick >/dev/null; sleep 1; a="$(( $(hits) - E0 )) $(( $(logn) - n0 ))"
+  fresh16; lost 0 "$(stamp 0)" "$PAST"; E0=$(hits); n0=$(logn); tick >/dev/null; sleep 1
+  row "16i past the hop ceiling, and expired: neither rings, neither logs" "0 0 / 0 0" "$a / $(( $(hits) - E0 )) $(( $(logn) - n0 ))"
+
+  fresh16; setdel 1; setctl muse '["claude"]'; lost 20 "$(stamp 0)" "$FUT" controller; E0=$(hits); tick >/dev/null; sleep 1; a=$(( $(hits) - E0 ))
+  setctl muse '[]'; fresh16; lost 20 "$(stamp 0)" "$FUT" controller; E0=$(hits); tick >/dev/null; sleep 1
+  row "16j a controller task at hop 20 rings under the same rule as a send; with the sender off the list it does not" "1 0" "$a $(( $(hits) - E0 ))"
+
+  fresh16; lost; d1 "UPDATE agents SET doorbell_url = 'https://blocked.botline-check.invalid/x' WHERE workspace_id = 'default' AND id = 'muse'"
+  E0=$(hits); n0=$(logn); tick >/dev/null; tick >/dev/null; sleep 1; a="$(( $(hits) - E0 )) $(( $(logn) - n0 ))"
+  d1 "UPDATE agents SET doorbell_url = '$BASE/v1/_echo' WHERE workspace_id = 'default' AND id = 'muse'"; E0=$(hits); tick >/dev/null; sleep 1
+  row "16k a blocked destination: no fetch and no log row on any tick; once fixed the next tick rings" "0 0 1" "$a $(( $(hits) - E0 ))"
+
+  fresh16; lost; E0=$(hits); tick >/dev/null; sleep 1
+  for i in 1 2 3 4 5; do expire; tick >/dev/null; sleep 1; done
+  row "16l a 2xx each time, mail still unread, agent silent: 1 ring + 3 recoveries, a lease apart, then nothing on two more ticks" "4 ok reconcile 1" "$(( $(hits) - E0 )) $(lastring)"
+  lost; E0=$(hits); expire; tick >/dev/null; sleep 1
+  row "16m newer mail behind that stuck message is a new anchor: it rings" "1" "$(( $(hits) - E0 ))"
+
+  fresh16; lost; E0=$(hits); tick >/dev/null; sleep 1
+  call GET '/v1/inbox?peek=1' "$KM" ""; a=$(j .count); sleep 1; expire; tick >/dev/null; sleep 1
+  b="$a $(( $(hits) - E0 )) $(d1q "SELECT read_at IS NULL AS u FROM receipts WHERE message_id = '$LOST'" .u)"
+  d1 "UPDATE agents SET last_seen_at = NULL WHERE workspace_id = 'default' AND id = 'muse'"; tick >/dev/null; sleep 1
+  row "16n the agent peeked after the ring (a peek writes nothing to the receipt): it is alive, so no second ring; silent again, the ring comes" "1 1 1 2" "$b $(( $(hits) - E0 ))"
+
+  fresh16; lost; d1 "DELETE FROM rings WHERE workspace_id = 'default' AND agent = 'muse'"; E0=$(hits); tick >/dev/null; sleep 1
+  row "16o an agent that has never had a rings row is recovered" "1 ok reconcile 1" "$(( $(hits) - E0 )) $(lastring)"
+
+  fresh16; lost; d1 "INSERT OR REPLACE INTO rings (workspace_id, agent, in_flight_since, lease_until, last_status, last_at) VALUES ('default', 'muse', '$(stamp -700)', '$(stamp -100)', 'ringing', '$(stamp -700)')"
+  E0=$(hits); tick >/dev/null; sleep 1
+  row "16p a Worker that died mid-ring left an in-flight lease: once that lease ends the tick recovers" "1 ok reconcile 1" "$(( $(hits) - E0 )) $(lastring)"
+
+  fresh16; lost; d1 "UPDATE rings SET rering_gen = 'chk-token', rering_at = '$(stamp -30)' WHERE workspace_id = 'default' AND agent = 'muse'"
+  E0=$(hits); tick >/dev/null; sleep 1; a="$(( $(hits) - E0 )) $(ringst .rering_gen)"
+  d1 "UPDATE rings SET rering_at = '$(stamp -300)' WHERE workspace_id = 'default' AND agent = 'muse'"; E0=$(hits); tick >/dev/null; sleep 1
+  row "16q a re-ring token 30 s overdue is the Queue's: no ring; 5 min overdue is lost: the tick rings through it and consumes it" "0 chk-token 1 null" "$a $(( $(hits) - E0 )) $(ringst .rering_gen)"
+
+  fresh16; lost; TRG=1; d1 "CREATE TRIGGER chk_no_ok BEFORE INSERT ON ring_log WHEN NEW.status = 'ok' BEGIN SELECT RAISE(ABORT, 'chk'); END"
+  E0=$(hits); tick >/dev/null; sleep 1; a="$(( $(hits) - E0 )) $(ringst .f)"; tick >/dev/null; tick >/dev/null; sleep 1
+  b=$(( $(hits) - E0 )); d1 "DROP TRIGGER chk_no_ok"; TRG=""
+  row "16r the 2xx's batch fails after the ring went out: the lease stays, so more ticks do not ring again" "1 1 1" "$a $b"
+  expire; E0=$(hits); tick >/dev/null; sleep 1
+  row "16s the failure passes and the lease ends: the mail, never recorded as accepted, is recovered" "1 ok reconcile 1" "$(( $(hits) - E0 )) $(lastring)"
+
+  fresh16; call GET /v1/me "$KM" ""; sleep 1
+  a=$(d1q "SELECT last_seen_at AS t FROM agents WHERE id = 'muse'" .t); call GET /v1/me "$KM" ""; sleep 1; b=$(d1q "SELECT last_seen_at AS t FROM agents WHERE id = 'muse'" .t)
+  fresh16; mcp "$KM" "{\"jsonrpc\":\"2.0\",\"id\":160,\"method\":\"tools/call\",\"params\":{$modern_meta,\"name\":\"me\",\"arguments\":{}}}"; sleep 1
+  row "16t last_seen_at: any keyed call stamps it, the next within 15 s writes nothing, MCP counts too" "stamped same stamped" \
+    "$([[ $a =~ ^20 ]] && echo stamped || echo "$a") $([[ $a == "$b" ]] && echo same || echo moved) $([[ $(d1q "SELECT last_seen_at AS t FROM agents WHERE id = 'muse'" .t) =~ ^20 ]] && echo stamped || echo none)"
+
+  fresh16; lost; tick >/dev/null; sleep 1; LSCOL=1; d1 "ALTER TABLE agents RENAME COLUMN last_seen_at TO last_seen_chk"; expire; E0=$(hits); a=$(tick); sleep 1
+  call GET /v1/me "$KM" ""; b=$STATUS
+  lost; tick >/dev/null; sleep 1; d1 "ALTER TABLE agents RENAME COLUMN last_seen_chk TO last_seen_at"; LSCOL=""
+  row "16u before the v0.6 migrate (no last_seen_at): the tick still answers, me still 200, only never-accepted mail rings" "200 200 1" "$a $b $(( $(hits) - E0 ))"
+
+  fresh16; RENAMED=1; d1 "ALTER TABLE workspaces RENAME TO workspaces_chk"; a=$(tick); d1 "ALTER TABLE workspaces_chk RENAME TO workspaces"; RENAMED=""
+  row "16v before v0.3 (no workspaces table): the tick answers, nothing rings" "200" "$a"
+  call GET '/v1/inbox?unread=1' "$KM" ""; dset none
+  d1 "DELETE FROM receipts WHERE message_id LIKE 'msg_lost%'"; d1 "DELETE FROM messages WHERE id LIKE 'msg_lost%'"
+else
+  echo "note: $R16_NOTE" >&2
+fi
+
+# 17. Table
 echo "| step | expected | actual | result |"
 echo "|---|---|---|---|"
 printf '%s\n' "${ROWS[@]}"
 echo
-echo "steps: ${#ROWS[@]}  failed: $FAILS  base: $BASE  $TS_NOTE  $NF_NOTE  $SW_NOTE  $UM_NOTE  $GT_NOTE  ${D14_NOTE:-}  ${UM15_NOTE:-}  at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "steps: ${#ROWS[@]}  failed: $FAILS  base: $BASE  $TS_NOTE  $NF_NOTE  $SW_NOTE  $UM_NOTE  $GT_NOTE  ${D14_NOTE:-}  ${UM15_NOTE:-}  $R16_NOTE  at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 [[ $FAILS -eq 0 ]]

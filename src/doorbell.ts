@@ -12,6 +12,11 @@
 //    RERING_PER_HOUR automatic re-rings per agent per hour. A re-ring claims the lease like a send's ring.
 // v0.5 (docs/plan-v0.5.md P3): a controller task rings past HOP_CEILING, up to CONTROLLER_HOP_CEILING; RINGABLE_SQL is
 // the one definition, shared with the watch URL (src/signal.ts).
+// v0.6 (docs/plan-v0.6.md T2): reconcile() is the one-minute backstop. A send's ring runs in ctx.waitUntil after the mail is
+// committed, and several paths end with mail unread and nothing due to ring it: a lost isolate, a ring that threw, a
+// coalesced send behind a ring that found nothing, a capped or failed re-ring, a Queue message past its retries, a blocked
+// destination since fixed, a 2xx whose run died. It rings through the same attempt(), so the lease, backoff and dead-letter
+// rules are the ones above. It only ever wakes an agent for mail nobody has claimed, so no instruction is resubmitted.
 // Core holds no vendor logic: adapters do (including which destinations they accept and what "busy" looks like).
 import { controllersOf, delegationOn, type AgentRow, type Env, type Message } from "./store";
 import { openSecret } from "./secrets";
@@ -30,6 +35,11 @@ export const DEAD_AT = 5;
 export const BUSY_DELAYS_S = [90, 180, 360];
 const BUSY_WINDOW_MS = 10 * 60_000;
 export const RERING_PER_HOUR = 6;
+export const RECONCILE_CRON = "* * * * *";
+/** Accepted rings allowed past the first for one anchor message: 3 recoveries, a lease apart. */
+export const RECOVER_MAX = 3;
+const RECOVER_PER_TICK = 5;
+const RERING_GRACE_MS = 120_000; // a re-ring token this far past due is the Queue's loss, not the Queue's job
 
 export interface RingPayload { agent: string; unread: number; message_ids: string[] }
 export interface RingResult { status: "ok" | "failed" | "timeout" | "no_doorbell"; httpStatus?: number }
@@ -105,7 +115,7 @@ async function ringOne(env: Env, msg: Message, agentId: string): Promise<void> {
  *  agent's pending token, then rings exactly like a send's ring: same lease claim, guards, hop ceiling, backoff and
  *  dead-letter. The token is consumed only AFTER the attempt: if anything throws first, the token stays for the Queue's
  *  retry (a duplicate delivery coalesces on the lease). A newer token set during the attempt is left alone. */
-export async function rering(env: Env, job: RingJob): Promise<"stale" | "no_doorbell" | "rang"> {
+export async function rering(env: Env, job: RingJob, via?: string): Promise<"stale" | "no_doorbell" | "rang"> {
   const p = await env.DB.prepare("SELECT rering_gen FROM rings WHERE workspace_id = ? AND agent = ?")
     .bind(job.ws, job.agent).first<{ rering_gen: string | null }>();
   if (!p || p.rering_gen !== job.gen) return "stale";
@@ -114,9 +124,69 @@ export async function rering(env: Env, job: RingJob): Promise<"stale" | "no_door
   const agent = await env.DB.prepare("SELECT * FROM agents WHERE workspace_id = ? AND id = ?").bind(job.ws, job.agent).first<AgentRow>();
   const adapter = agent ? ADAPTERS[agent.doorbell_kind] : undefined;
   if (!agent || agent.doorbell_kind === "none" || !agent.doorbell_url || !adapter) return void (await consume()), "no_doorbell";
-  await attempt(env, agent, adapter, [], true);
+  await attempt(env, agent, adapter, [], true, via);
   await consume();
   return "rang";
+}
+
+type Pending = AgentRow & { gen: string | null; fresh: string | null; last_ok: string | null };
+
+/** Doorbelled agents with mail to recover, oldest mail first. Agents are few and only unread receipts are read (the
+ *  receipts_unread index, per agent), so an idle minute costs one small query. The anchor is the oldest unread mail no
+ *  doorbell has accepted, else the oldest unread mail; `oks` counts the accepted rings since it, from the log the rings
+ *  already write. No lease is live, the agent is not dead-lettered, and any re-ring token is past the Queue's turn. */
+const RECONCILE_SQL = `
+  WITH pending AS (
+    SELECT a.workspace_id AS ws, a.id AS agent_id, g.rering_gen AS gen, MIN(m.created_at) AS oldest,
+      MIN(CASE WHEN r.delivered_at IS NULL THEN m.created_at END) AS fresh
+    FROM agents a
+    JOIN receipts r ON r.workspace_id = a.workspace_id AND r.agent = a.id AND r.read_at IS NULL
+    JOIN messages m ON m.id = r.message_id
+    LEFT JOIN rings g ON g.workspace_id = a.workspace_id AND g.agent = a.id
+    LEFT JOIN workspaces w ON w.id = a.workspace_id
+    WHERE a.doorbell_kind <> 'none' AND a.doorbell_url IS NOT NULL
+      AND (g.lease_until IS NULL OR g.lease_until <= ?1) AND COALESCE(g.fail_count, 0) < ?2
+      AND (g.rering_at IS NULL OR g.rering_at <= ?3)
+      AND (m.expires_at IS NULL OR m.expires_at > ?1)
+      AND ${RINGABLE_SQL("COALESCE(w.delegation, 0)",
+        "CASE WHEN json_valid(a.controllers) AND json_type(a.controllers) = 'array' THEN a.controllers ELSE '[]' END")}
+    GROUP BY a.workspace_id, a.id
+  ), oks AS (
+    SELECT p.*, COUNT(l.id) AS n, MAX(l.at) AS last_ok FROM pending p
+    LEFT JOIN ring_log l ON l.workspace_id = p.ws AND l.agent = p.agent_id AND l.status = 'ok' AND l.at >= COALESCE(p.fresh, p.oldest)
+    GROUP BY p.ws, p.agent_id
+  )
+  SELECT ag.*, o.gen, o.fresh, o.last_ok FROM oks o JOIN agents ag ON ag.workspace_id = o.ws AND ag.id = o.agent_id
+  WHERE o.n <= ?4 ORDER BY o.oldest`;
+
+/** Mail a doorbell already accepted rings again only if the agent has been silent since that ring: a live agent may hold a
+ *  peeked task, and a second run would repeat it. Mail nobody accepted has woken nobody, so the gate does not apply.
+ *  Before the v0.6 migrate there is no last_seen_at (undefined, not null): silence cannot be shown, so no re-ring. */
+const silent = (p: Pending) => !!p.fresh || (p.last_seen_at !== undefined && (!p.last_ok || !p.last_seen_at || p.last_seen_at < p.last_ok));
+
+/** The every-minute backstop (see the header). `oks` bounds accepted rings; failures have their own bound (backoff, then
+ *  dead-letter). One agent's failure does not stop the others. A database before migrate.mjs recovers nothing. */
+export async function reconcile(env: Env): Promise<{ rung: number; failed: number }> {
+  const t = Date.now();
+  let rows: Pending[];
+  try {
+    rows = (await env.DB.prepare(RECONCILE_SQL).bind(iso(t), DEAD_AT, iso(t - RERING_GRACE_MS), RECOVER_MAX).all<Pending>()).results;
+  } catch (e) {
+    if (/no such (table|column)/.test(String(e))) return { rung: 0, failed: 0 };
+    throw e;
+  }
+  const due = rows.filter((p) => {
+    const adapter = ADAPTERS[p.doorbell_kind];
+    if (!adapter || !silent(p)) return false;
+    try { return adapter.allows(new URL(p.doorbell_url!), env); } catch { return false; } // fixing it rings on the next tick
+  }).slice(0, RECOVER_PER_TICK);
+  const done = await Promise.allSettled(due.map((p) => p.gen
+    ? rering(env, { ws: p.workspace_id, agent: p.id, gen: p.gen }, "reconcile")
+    : attempt(env, p, ADAPTERS[p.doorbell_kind], [], true, "reconcile")));
+  const failed = done.filter((d) => d.status === "rejected");
+  for (const f of failed) console.error("reconcile", String((f as PromiseRejectedResult).reason).slice(0, 200));
+  if (due.length) console.log(JSON.stringify({ event: "reconcile", rung: due.length - failed.length, failed: failed.length }));
+  return { rung: due.length - failed.length, failed: failed.length };
 }
 
 /** Persist a re-ring due in `delayS` seconds (a fresh token, inside the hourly cap) and hand it to the Queue. Without a
@@ -157,9 +227,9 @@ async function readRecently(env: Env, ws: string, agent: string): Promise<boolea
 }
 
 /** Claim the agent's lease and ring it once: a send's ring (logIds = the new message) or a scheduled re-ring. */
-async function attempt(env: Env, agent: AgentRow, adapter: AdapterModule, logIds: string[], isRering: boolean): Promise<void> {
+async function attempt(env: Env, agent: AgentRow, adapter: AdapterModule, logIds: string[], isRering: boolean, via?: string): Promise<void> {
   const ws = agent.workspace_id, agentId = agent.id, kind = agent.doorbell_kind;
-  const log = (status: string, ids = logIds, http?: number, detail?: string) => logStmt(env, ws, agentId, kind, status, ids, http, detail);
+  const log = (status: string, ids = logIds, http?: number, detail = via) => logStmt(env, ws, agentId, kind, status, ids, http, detail);
 
   // 3. Coalesce: claim the lease atomically. RETURNING yields a row only if we inserted, or updated an
   //    expired/cleared lease of an agent that is not dead-lettered. Otherwise nothing is fetched, and the log says why:
@@ -188,11 +258,14 @@ async function attempt(env: Env, agent: AgentRow, adapter: AdapterModule, logIds
   }
 
   // Anything that throws after the claim releases our lease (guarded by our stamp) before it propagates, so a retry or
-  // the next send can ring instead of waiting out a lease nothing holds.
+  // the next send can ring instead of waiting out a lease nothing holds. But once the ring has gone out the lease stays:
+  // the agent may be waking, and the `ok` row that bounds recovery may be what failed to write, so a release here would
+  // let the next tick ring again, every tick. (Only the lease's own end bounds that; a poll still clears it.)
+  const progress = { rang: false };
   try {
-    await afterClaim(env, agent, adapter, logIds, isRering, t, claimed);
+    await afterClaim(env, agent, adapter, logIds, isRering, t, claimed, progress, via);
   } catch (e) {
-    await env.DB.prepare("UPDATE rings SET in_flight_since = NULL, lease_until = NULL WHERE workspace_id = ? AND agent = ? AND in_flight_since = ?")
+    if (!progress.rang) await env.DB.prepare("UPDATE rings SET in_flight_since = NULL, lease_until = NULL WHERE workspace_id = ? AND agent = ? AND in_flight_since = ?")
       .bind(ws, agentId, iso(t)).run().catch(() => undefined);
     throw e;
   }
@@ -200,10 +273,10 @@ async function attempt(env: Env, agent: AgentRow, adapter: AdapterModule, logIds
 
 async function afterClaim(
   env: Env, agent: AgentRow, adapter: AdapterModule, logIds: string[], isRering: boolean, t: number,
-  claimed: { fail_count?: number; busy_count?: number },
+  claimed: { fail_count?: number; busy_count?: number }, progress: { rang: boolean }, via?: string,
 ): Promise<void> {
   const ws = agent.workspace_id, agentId = agent.id, kind = agent.doorbell_kind;
-  const log = (status: string, ids = logIds, http?: number, detail?: string) => logStmt(env, ws, agentId, kind, status, ids, http, detail);
+  const log = (status: string, ids = logIds, http?: number, detail = via) => logStmt(env, ws, agentId, kind, status, ids, http, detail);
   // A re-ring rings only for ringable mail (RINGABLE_SQL; a send's ring checked its own message above). Only a re-ring
   // names trust_at_send: re-rings exist only on a migrated database, and a send's ring keeps working without it.
   const unread = await (isRering
@@ -274,6 +347,7 @@ async function afterClaim(
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), TIMEOUT_MS);
   let res: RingResult;
+  progress.rang = true;
   try {
     res = await adapter.ring({ url: url.toString(), secret: opened.secret }, { agent: agentId, unread: ids.length, message_ids: ids }, ac.signal);
   } finally {

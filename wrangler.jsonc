@@ -22,10 +22,12 @@
   // File bytes (v0.2). Create the bucket once: `npx wrangler r2 bucket create botline-files`. To run without files,
   // delete this entry: file routes then answer 501 files_not_configured and everything else works as before.
   "r2_buckets": [{ "binding": "FILES", "bucket_name": "botline-files" }],
-  // Daily file retention: deletes expired and abandoned files in bounded passes (src/files.ts sweep). Counts toward the
-  // account's Cron Trigger limit (Workers Free allows only a few per account); without it, expired files stay unreadable
-  // but their bytes and quota are not reclaimed.
-  "triggers": { "crons": ["23 4 * * *"] },
+  // Two Cron Triggers, each counting toward the account's limit (5 on Workers Free).
+  // "23 4 * * *", daily: deletes expired and abandoned files in bounded passes (src/files.ts sweep). Without it, expired
+  // files stay unreadable but their bytes and quota are not reclaimed.
+  // "* * * * *": recovers lost wake-ups (src/doorbell.ts reconcile). One indexed query when there is nothing to do.
+  // Without it, mail whose ring was lost waits for the next send, as before v0.6.
+  "triggers": { "crons": ["23 4 * * *", "* * * * *"] },
   // Re-rings (v0.4, src/doorbell.ts): a doorbell that is busy (the agent is mid-run) or failed rings again by itself, through
   // this queue (Workers Free includes 10,000 queue operations a day). Create it once: `npx wrangler queues create
   // botline-rering`. To run without it, delete this entry: a busy ring then counts as a failure and nothing re-rings after

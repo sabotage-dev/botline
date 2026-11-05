@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS agents (
                                                  -- (only while the workspace has delegation on; scripts/agent-trust.mjs)
   type TEXT NOT NULL DEFAULT 'custom',           -- v0.5: the runtime it is (src/agent-types.json; scripts/agent-type.mjs).
                                                  -- A label only: nothing on the server decides anything from it.
+  last_seen_at TEXT,                             -- v0.6: the last keyed REST or MCP call of any kind, to within 15 s. A 2xx
+                                                 -- from a doorbell never sets it (store.ts touch)
   PRIMARY KEY (workspace_id, id)
 );
 
@@ -81,8 +83,10 @@ CREATE TABLE IF NOT EXISTS ring_log (
   message_ids TEXT,              -- JSON array
   at TEXT NOT NULL,
   detail TEXT                    -- reason on error/failed/timeout rows: no_master_key | bad_master_key | decrypt_failed
-                                 -- | http <status> | timeout | network_error | exception (NULL otherwise)
+                                 -- | http <status> | timeout | network_error | exception; 'reconcile' on other rows
+                                 -- the v0.6 reconciler caused (NULL otherwise)
 );
+CREATE INDEX IF NOT EXISTS ring_log_agent ON ring_log (workspace_id, agent, at);
 
 CREATE TABLE IF NOT EXISTS echo_hits (         -- test doorbell target (POST /v1/_echo; only when ECHO_SECRET is set)
   id INTEGER PRIMARY KEY AUTOINCREMENT,

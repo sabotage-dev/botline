@@ -3,13 +3,14 @@
 // --check changes nothing: it exits 1 and names what a deploy of this code would find missing.
 // Brings an existing database up to schema.sql. SQLite has no ADD COLUMN IF NOT EXISTS, so this reads
 // PRAGMA table_info and adds only the missing columns. Additive only; a no-op on a fresh schema.sql install.
-// New TABLES come from re-running schema.sql (safe to re-run); this script names any that are still missing.
+// New TABLES and INDEXES come from re-running schema.sql (safe to re-run); this script names any that are still missing.
 import { readFileSync } from "node:fs";
 import { die, parseArgs, runQuery, runSql } from "./_d1.mjs";
 
 const COLUMNS = {
-  agents: { // v0.1 grace; v0.4 controllers; v0.5 type
+  agents: { // v0.1 grace; v0.4 controllers; v0.5 type; v0.6 last_seen_at
     key_hash_prev: "TEXT", prev_valid_until: "TEXT", controllers: "TEXT NOT NULL DEFAULT '[]'", type: "TEXT NOT NULL DEFAULT 'custom'",
+    last_seen_at: "TEXT",
   },
   rings: {
     fail_count: "INTEGER NOT NULL DEFAULT 0", // v0.1: doorbell backoff + dead-letter
@@ -40,11 +41,16 @@ if (check) {
   console.error(add.length ? `applied (${mode.slice(2)}):\n${add.join("\n")}` : `columns up to date (${mode.slice(2)})`);
 }
 
-const want = [...readFileSync(new URL("../schema.sql", import.meta.url), "utf8").matchAll(/CREATE TABLE IF NOT EXISTS (\w+)/g)].map((m) => m[1]);
-const tables = runQuery("SELECT name FROM sqlite_master WHERE type = 'table';", mode);
-const haveTables = Array.isArray(tables) ? tables.at(-1)?.results?.map((t) => t.name) ?? [] : [];
-const missing = want.filter((t) => !haveTables.includes(t));
+const schema = readFileSync(new URL("../schema.sql", import.meta.url), "utf8");
+const named = (re) => [...schema.matchAll(re)].map((m) => m[1]);
+const objects = runQuery("SELECT type, name FROM sqlite_master WHERE type IN ('table', 'index');", mode);
+const rows = Array.isArray(objects) ? objects.at(-1)?.results ?? [] : [];
+const have = (type) => rows.filter((r) => r.type === type).map((r) => r.name);
+const missing = [
+  ...named(/CREATE TABLE IF NOT EXISTS (\w+)/g).filter((t) => !have("table").includes(t)).map((t) => `table ${t}`),
+  ...named(/CREATE INDEX IF NOT EXISTS (\w+)/g).filter((i) => !have("index").includes(i)).map((i) => `index ${i}`),
+];
 if (missing.length) {
-  console.error(`missing table(s): ${missing.join(", ")} -- run: npx wrangler d1 execute <db> ${mode} --file schema.sql (safe to re-run)`);
-  process.exitCode = 1; // a Worker deployed now would fail on those tables
+  console.error(`missing: ${missing.join(", ")} -- run: npx wrangler d1 execute <db> ${mode} --file schema.sql (safe to re-run)`);
+  process.exitCode = 1; // a Worker deployed now would fail on those tables, or scan without those indexes
 }
