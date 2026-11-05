@@ -171,21 +171,26 @@ cleanup() {
 trap cleanup EXIT
 
 PERSIST=(); [[ $MODE == --local && -n ${BOTLINE_PERSIST_TO:-} ]] && PERSIST=(--persist-to "$BOTLINE_PERSIST_TO")
-# A wrangler process can lose a moment's lock to the Workers holding the same local database, more often on a slow machine, and a
-# lost INSERT would surface rows later as data that is simply missing. Three tries; the summary line counts the retries.
+# d1 retries only a lost lock, which cannot have committed: a wrangler process can lose one to the Workers holding the same local
+# database. Any other failure may have committed, so it is never replayed; it is recorded and printed with the summary, because
+# otherwise a lost write only shows up rows later as data that is simply missing.
 d1() {
-  local i
+  local i out
   for i in 1 2 3; do
-    (cd "$ROOT" && npx wrangler d1 execute "$DB" "$MODE" ${PERSIST[@]+"${PERSIST[@]}"} --command "$1" --yes >/dev/null 2>&1) && return 0
+    out=$(cd "$ROOT" && npx wrangler d1 execute "$DB" "$MODE" ${PERSIST[@]+"${PERSIST[@]}"} --command "$1" --yes 2>&1) && return 0
+    grep -qiE 'database is locked|SQLITE_BUSY' <<<"$out" || break
+    (( i == 3 )) && break
     echo x >>"$TMP/d1-retries"; sleep 1
   done
+  printf '%s: %s\n' "${1:0:70}" "$(grep -iE 'error|✘' <<<"$out" | head -1 | cut -c1-120)" >>"$TMP/d1-failed"
   return 1
 }
-# d1q SQL JQ -> JQ applied to the first result row (wrangler's --remote progress lines are skipped)
+# d1q SQL JQ -> JQ applied to the first result row (wrangler's --remote progress lines are skipped). A read replays safely.
 d1q() {
   local i out=""
   for i in 1 2 3; do
     out=$(cd "$ROOT" && npx wrangler d1 execute "$DB" "$MODE" ${PERSIST[@]+"${PERSIST[@]}"} --command "$1" --yes --json 2>/dev/null) && break
+    (( i == 3 )) && break
     echo x >>"$TMP/d1-retries"; sleep 1
   done
   sed -n '/^\[/,$p' <<<"$out" | jq -r ".[-1].results[0] | $2" 2>/dev/null
@@ -1491,5 +1496,6 @@ echo "| step | expected | actual | result |"
 echo "|---|---|---|---|"
 printf '%s\n' "${ROWS[@]}"
 echo
-echo "steps: ${#ROWS[@]}  failed: $FAILS  base: $BASE  $TS_NOTE  $NF_NOTE  $SW_NOTE  $UM_NOTE  $GT_NOTE  ${D14_NOTE:-}  ${UM15_NOTE:-}  $R16_NOTE  $R18_NOTE  $R19_NOTE  $R20_NOTE  d1 retries: $(wc -l <"$TMP/d1-retries" 2>/dev/null | tr -d ' ' || echo 0)  at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "steps: ${#ROWS[@]}  failed: $FAILS  base: $BASE  $TS_NOTE  $NF_NOTE  $SW_NOTE  $UM_NOTE  $GT_NOTE  ${D14_NOTE:-}  ${UM15_NOTE:-}  $R16_NOTE  $R18_NOTE  $R19_NOTE  $R20_NOTE  d1 retries: $(cat "$TMP/d1-retries" 2>/dev/null | wc -l | tr -d ' ')  at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+if [[ -s $TMP/d1-failed ]]; then echo "d1 statements that failed:"; head -n 10 "$TMP/d1-failed"; fi
 [[ $FAILS -eq 0 ]]
