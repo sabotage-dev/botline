@@ -171,11 +171,24 @@ cleanup() {
 trap cleanup EXIT
 
 PERSIST=(); [[ $MODE == --local && -n ${BOTLINE_PERSIST_TO:-} ]] && PERSIST=(--persist-to "$BOTLINE_PERSIST_TO")
-d1() { (cd "$ROOT" && npx wrangler d1 execute "$DB" "$MODE" ${PERSIST[@]+"${PERSIST[@]}"} --command "$1" --yes >/dev/null 2>&1); }
+# A wrangler process can lose a moment's lock to the Workers holding the same local database, more often on a slow machine, and a
+# lost INSERT would surface rows later as data that is simply missing. Three tries; the summary line counts the retries.
+d1() {
+  local i
+  for i in 1 2 3; do
+    (cd "$ROOT" && npx wrangler d1 execute "$DB" "$MODE" ${PERSIST[@]+"${PERSIST[@]}"} --command "$1" --yes >/dev/null 2>&1) && return 0
+    echo x >>"$TMP/d1-retries"; sleep 1
+  done
+  return 1
+}
 # d1q SQL JQ -> JQ applied to the first result row (wrangler's --remote progress lines are skipped)
 d1q() {
-  (cd "$ROOT" && npx wrangler d1 execute "$DB" "$MODE" ${PERSIST[@]+"${PERSIST[@]}"} --command "$1" --yes --json 2>/dev/null) \
-    | sed -n '/^\[/,$p' | jq -r ".[-1].results[0] | $2" 2>/dev/null
+  local i out=""
+  for i in 1 2 3; do
+    out=$(cd "$ROOT" && npx wrangler d1 execute "$DB" "$MODE" ${PERSIST[@]+"${PERSIST[@]}"} --command "$1" --yes --json 2>/dev/null) && break
+    echo x >>"$TMP/d1-retries"; sleep 1
+  done
+  sed -n '/^\[/,$p' <<<"$out" | jq -r ".[-1].results[0] | $2" 2>/dev/null
 }
 MK=$([[ -n ${DOORBELL_MASTER_KEY:-} ]] && echo set || echo unset) # never print the key itself
 iso_re='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$'
@@ -1478,5 +1491,5 @@ echo "| step | expected | actual | result |"
 echo "|---|---|---|---|"
 printf '%s\n' "${ROWS[@]}"
 echo
-echo "steps: ${#ROWS[@]}  failed: $FAILS  base: $BASE  $TS_NOTE  $NF_NOTE  $SW_NOTE  $UM_NOTE  $GT_NOTE  ${D14_NOTE:-}  ${UM15_NOTE:-}  $R16_NOTE  $R18_NOTE  $R19_NOTE  $R20_NOTE  at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "steps: ${#ROWS[@]}  failed: $FAILS  base: $BASE  $TS_NOTE  $NF_NOTE  $SW_NOTE  $UM_NOTE  $GT_NOTE  ${D14_NOTE:-}  ${UM15_NOTE:-}  $R16_NOTE  $R18_NOTE  $R19_NOTE  $R20_NOTE  d1 retries: $(wc -l <"$TMP/d1-retries" 2>/dev/null | tr -d ' ' || echo 0)  at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 [[ $FAILS -eq 0 ]]
