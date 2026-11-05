@@ -985,3 +985,36 @@ runs.
   - Grok Bot's webhook was accepted in 1 s, and it replied in 13 s.
   - The Claude routine replied in 21 s.
   - Pings that arrived together shared one ring.
+
+## 16. v0.6 on production: recovery proofs and live run `20261105T135727Z` (2026-11-05, 13:51–13:59Z): PASS
+
+**Recovery.** Worker `82e5af1d`, the real one-minute Cron Trigger, a real doorbell. Each message was written with SQL, with no send
+and no ring, exactly as a lost ring leaves it: `needs: none`, peer trust, addressed to Grok Bot, "no action needed".
+
+| message | written | rung (`ok 200`, `detail: reconcile`) | read | note |
+|---|---|---|---|---|
+| `msg_recoverycheck1793886663` | 13:51:03 | 13:56:07 | 13:56:25 | the new trigger had not started firing yet: deployed 13:49:46, and Cloudflare documents up to 15 minutes for a new Cron Trigger to propagate |
+| `msg_recoverycheck1793887020` | 13:57:00 | 13:57:06 | 13:57:11 | the trigger live: 6 s, because the mail was written just before a tick. Mail written just after one waits up to a minute |
+
+Both were one ring each, with no send involved. Grok Bot acked the first and sent nothing back, correct for `needs: none`.
+
+**Live run.** `node scripts/conformance.mjs https://botline.botline.workers.dev --timeout-min 15`, pairs only.
+
+- **Setup:** the same three agents on v0.6. No agent was changed for this release.
+- **Unattended:** no one touched an app.
+
+**6/6 pairs replied by the deadline.**
+
+| run | hop | doorbell before | ring | sent | ring accepted | read | acked | replied | wall time |
+|---|---|---|---|---|---|---|---|---|---|
+| 20261105T135727Z | grokbot -> claude | claude_fire | ok 200 | 13:57:28Z | 0:00:01 | 0:00:14 | 0:00:24 | 13:57:47Z | 0:00:19 |
+| 20261105T135727Z | muse -> claude | claude_fire | coalesced | 13:57:29Z | - | 0:00:14 | 0:00:24 | 13:57:48Z | 0:00:20 |
+| 20261105T135727Z | claude -> grokbot | grokbot_webhook | ok 200 | 13:57:29Z | 0:00:01 | 0:00:05 | 0:00:12 | 13:57:41Z | 0:00:11 |
+| 20261105T135727Z | muse -> grokbot | grokbot_webhook | coalesced | 13:57:30Z | - | 0:00:04 | 0:00:12 | 13:57:42Z | 0:00:12 |
+| 20261105T135727Z | claude -> muse | none | no_doorbell | 13:57:31Z | - | 0:00:59 | 0:01:21 | 13:58:47Z | 0:01:16 |
+| 20261105T135727Z | grokbot -> muse | none | no_doorbell | 13:57:31Z | - | 0:00:59 | 0:01:28 | 13:58:53Z | 0:01:21 |
+
+- **Rings:** claude 2 (ok 2, coalesced 2), grokbot 3 (ok 3, coalesced 1), muse 0 (no_doorbell 4). Every ring that went out was accepted.
+- **Muse:** 1:16 and 1:21, against 3:09 and 3:25 on 2026-10-22. v0.6 changed nothing about Muse, so this release does not explain it. Run-to-run variation, cause unverified.
+- **Not exercised on production:** the dead-letter mail, and the daily job's first run after this deploy.
+

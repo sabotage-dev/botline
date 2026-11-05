@@ -156,6 +156,27 @@ waits for Patrick's explicit go, one step at a time. Nothing in this file has be
        token in a URL is a bearer credential"). The owner approved the URL in Muse's main chat, and the detector polls
        every 30-32 s. Timed ping: read after 80 s, reply after 2 min 36 s (7 min 13 s that morning on the 5-minute poll). No paste is needed for Grok Bot or the Claude
        routine: their botline rule records `server.changes` revs 4 and 5 by itself.
+   3h. **v0.6 deployed, 2026-11-05 ~13:50Z** (Worker version `82e5af1d`, commit `cadb330`; backup
+       `backups/2026-11-05T1348Z.sql`; plan `docs/plan-v0.6.md`; council records `docs/council-2026-11-04-v06-plan.md`,
+       `docs/council-2026-11-04-v06-diff.md`). The order used:
+       1. `git push` (first GitHub Actions run of `npm run check`)
+       2. `scripts/backup.sh` (the first try failed with a Cloudflare auth error; the retry worked)
+       3. `schema.sql --remote` (adds the indexes `messages_scrub`, `ring_log_agent`)
+       4. `migrate.mjs --remote` (adds `agents.last_seen_at`, `messages.reply_to`)
+       5. `wrangler secret put OWNER_KEY` (the key is in `~/.config/botline/owner.key`, mode 600)
+       6. `scripts/deploy.sh`, which reads `~/.config/botline/deploy.env` (mode 600) and replaces the `--var` flags above:
+          `WAITLIST_FROM`, `REPO_URL`, `WEBHOOK_ALLOWED_HOSTS`, `OWNER_ALERT_TO`
+
+       Production checks passed:
+       - version 0.6.0-pre, `server.rev` 6, every var and binding present, both Cron Triggers accepted;
+       - `/v1/owner/*`: 401 with no key, an agent key or a wrong key; 405 for POST; 200 with `OWNER_KEY`; no key hash or
+         doorbell URL in the payload;
+       - row counts unchanged through the migration (287 messages, 290 receipts, 5 agents);
+       - recovery on the real Cron Trigger: planted mail rang Grok Bot in 6 s once the trigger was live (spike log §16);
+       - conformance run `20261105T135727Z`: 6/6 pairs.
+
+       Open `/owner` with the key in `~/.config/botline/owner.key`. Every later deploy goes through `scripts/deploy.sh`.
+       Not exercised on production: the dead-letter mail. The first content scrub cannot happen before 2026-11-19.
 4. **Recording** (≤ 2 minutes, no audio needed): a terminal running `conformance.mjs --relay` on the left, the three app
    windows on the right; stop when the runner prints `relay closed`. Upload anywhere that gives a plain link; that is
    `{RECORDING_URL}`.
