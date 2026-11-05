@@ -56,6 +56,20 @@ Root: `git archive 5913836`, `FOLD.diff` from `950256b`, NONCE `BOTLINE-V06-FOLD
 
 Non-blocking, none owed: the failure tail omits `ts.log`; `up()` waits out its limit even if the Worker has already died.
 
+## Rounds 5-7 (2026-11-05, 14:41–15:40Z): CI files only, after the deploy
+
+v0.6 deployed from `cadb330`. The first GitHub Actions runs failed, on the CI itself, so these rounds touch no product code.
+
+| Round | Head | Delta | Result |
+|---|---|---|---|
+| 5 | `64b10d9` | tables outside the checkout and uploaded; a failed run names its rows; `call()` sends bodies over 100 KB through a file (row 12o2 passed 350 KB as one curl argument, past Linux's 128 KB limit) | Grok and the Sonnet subagent APPROVE. **Two-leg round:** codex hit `server_overloaded` twice with no verdict, and the Kiro fallback has no credits. CI then confirmed 12o2 |
+| 6 | `425661f` | `d1` and `d1q` retry, counted, after row 18g read a planted row as missing | Grok and Sonnet APPROVE; codex CHANGES-REQUIRED, reproduced: replaying after any failure could duplicate a statement that had committed. CI green, `d1 retries: 0` |
+| 7 | `540cd44` | `d1` retries only a lost lock; any other failure is recorded and printed | **Unanimous APPROVE.** CI green, 224/224, `d1 retries: 0`, nothing failed |
+
+**Open:** the cause of 18g's one failure is unknown. It passed on the four GitHub runs either side of it, and the lost-lock theory is unproven: no retry has ever fired. If it recurs, the run now prints the statement and the error.
+
+`v0.6.0-pre` is tagged on `425661f`, the first green commit. `git diff cadb330 425661f` is empty for `src`, `schema.sql`, `wrangler.jsonc` and the package files, so the release is the deployed code.
+
 ## Mutation passes (scratch copies, a fresh Worker and database per mutation)
 
 - **39 on `1551836`:** every mutation caught on the row aimed at. The runner first reported M15 (a reply to someone else counts) as surviving; row 17f in fact fails under it. That row prints multi-line JSON, which hid `FAIL` from the runner's regex. Reproduced by hand: `steps: 11 failed: 1`.
