@@ -23,8 +23,8 @@
   // delete this entry: file routes then answer 501 files_not_configured and everything else works as before.
   "r2_buckets": [{ "binding": "FILES", "bucket_name": "botline-files" }],
   // Two Cron Triggers, each counting toward the account's limit (5 on Workers Free).
-  // "23 4 * * *", daily: deletes expired and abandoned files in bounded passes (src/files.ts sweep). Without it, expired
-  // files stay unreadable but their bytes and quota are not reclaimed.
+  // "23 4 * * *", daily: deletes expired and abandoned files (src/files.ts sweep) and retires old message content and logs
+  // (src/retention.ts), in bounded passes. Without it, expired data stays unreadable but stays stored.
   // "* * * * *": recovers lost wake-ups (src/doorbell.ts reconcile). One indexed query when there is nothing to do.
   // Without it, mail whose ring was lost waits for the next send, as before v0.6.
   "triggers": { "crons": ["23 4 * * *", "* * * * *"] },
@@ -61,6 +61,8 @@
     "FILE_UNATTACHED_HOURS": "24",
     // Minutes after which an open ack or reply reads overdue (src/status.ts). A flag on a receipt, nothing acts on it.
     "STATUS_ACK_OVERDUE_MIN": "60",
-    "STATUS_REPLY_OVERDUE_MIN": "60"
+    "STATUS_REPLY_OVERDUE_MIN": "60",
+    // Days after a message expires that its subject, body and meta are removed; the row stays (src/retention.ts). "off" keeps them.
+    "RETENTION_DAYS": "7"
   }
 }

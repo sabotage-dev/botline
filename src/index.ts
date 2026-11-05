@@ -4,6 +4,7 @@ import { markSeen } from "./capabilities";
 import { reconcile, RECONCILE_CRON, rering, type RingJob } from "./doorbell";
 import { handleMcp, rpcError } from "./mcp";
 import { docsHtml, openapi } from "./openapi";
+import { retain } from "./retention";
 import { signal } from "./signal";
 import * as files from "./files";
 import * as store from "./store";
@@ -156,11 +157,13 @@ export default {
     }
   },
   // Cron Triggers (wrangler.jsonc "triggers"). Every minute: recover lost wake-ups. Otherwise (the daily trigger): delete
-  // expired and abandoned files in bounded passes. Awaited, not waitUntil: that is cut at 30 s, this handler has 15 minutes.
+  // expired and abandoned files and retire old data, each in bounded passes, neither stopping the other. Awaited, not
+  // waitUntil: that is cut at 30 s, this handler has 15 minutes.
   async scheduled(controller, env) {
     if (controller.cron === RECONCILE_CRON) return void (await reconcile(env));
-    const r = await files.sweep(env);
-    if (r.deleted) console.log("files swept", r.deleted);
+    const [swept, kept] = await Promise.allSettled([files.sweep(env), retain(env)]);
+    if (swept.status === "fulfilled" && swept.value.deleted) console.log("files swept", swept.value.deleted);
+    for (const r of [swept, kept]) if (r.status === "rejected") throw r.reason; // recorded as this Cron run's failure
   },
   // v0.4: the optional RERING Queue's consumer. Each message is one scheduled re-ring; a stale token does nothing.
   async queue(batch, env) {

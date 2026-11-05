@@ -42,6 +42,8 @@
 #      (--local only).
 #      Section 16 (v0.6: the reconciler) fires `/__scheduled?cron=* * * * *` itself, so it needs `wrangler dev --test-scheduled`,
 #      and it plants mail and rewrites ring state with SQL, so it runs only with --local (skipped otherwise; the summary says so).
+#      Section 18 (v0.6: retention) plants aged rows with SQL and fires the daily Cron, so it too runs only with --local and
+#      --test-scheduled. BOTLINE_NOFILES_BASE, started with --test-scheduled --var RETENTION_DAYS:off, adds the off row.
 #      Cleanup failures are printed as `warning: cleanup: …` lines on stderr.
 # Requires curl, jq, python3. Prints a markdown table; exits 1 if any step fails. Never prints a key.
 set -uo pipefail
@@ -1300,10 +1302,64 @@ if [[ $MODE == --local ]]; then
   call GET '/v1/inbox?unread=1' "$KG" ""; call GET '/v1/inbox?unread=1' "$KC" ""
 fi
 
-# 18. Table
+# 18. Retention (v0.6, docs/plan-v0.6.md T4). claude sent, grokbot received. Aged rows are planted with SQL; the daily Cron runs.
+R18_NOTE="retention rows: skipped (needs --local and wrangler dev --test-scheduled)"
+DAILY="/__scheduled?cron=23+4+*+*+*"
+if [[ $MODE == --local && $(curl -s -o /dev/null -w '%{http_code}' "$BASE$DAILY") == 200 ]]; then
+  R18_NOTE="retention rows: ran"
+  ago() { python3 -c "import datetime,sys; print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(days=float(sys.argv[1]))).strftime('%Y-%m-%dT%H:%M:%S.000Z'))" "$1"; }
+  daily() { curl -s -o /dev/null -w '%{http_code}' "$BASE$DAILY"; sleep 1; }
+  aged() { # ID EXPIRED_DAYS_AGO [KEY]: a message claude sent grokbot, expired that many days ago
+    local key=NULL; [[ -n ${3:-} ]] && key="'$3'"
+    d1 "INSERT INTO messages (workspace_id, id, thread_id, hop_count, from_agent, to_agents, subject, body, needs, idempotency_key, created_at, expires_at, meta) VALUES ('default', '$1', 'thr_$1', 0, 'claude', '[\"grokbot\"]', 'secret subject', 'secret body', 'none', $key, '$(ago 40)', '$(ago "$2")', '{\"k\":\"secret meta\"}')"
+    d1 "INSERT INTO receipts (workspace_id, message_id, agent, read_at) VALUES ('default', '$1', 'grokbot', '$(ago 39)')"
+  }
+  content() { d1q "SELECT subject, body, meta, (SELECT COUNT(*) FROM receipts WHERE message_id = '$1') AS r FROM messages WHERE id = '$1'" '"[\(.subject)] [\(.body)] \(.meta) \(.r)"'; }
+  T18=$(now_ms); IK="chk-retain-$T18"; OLD="msg_old$T18"; NEW="msg_recent$T18"
+  aged "$OLD" 8 "$IK"; aged "$NEW" 1
+  a=$(daily)
+  row "18a 8 days past expiry: subject, body and meta gone, the row and its receipt stay; 1 day past: untouched" \
+    "200 [] [] null 1 / [secret subject] [secret body] {\"k\":\"secret meta\"} 1" "$a $(content "$OLD") / $(content "$NEW")"
+  m0=$(d1q "SELECT COUNT(*) AS n FROM messages" .n); daily >/dev/null
+  row "18b a second run changes nothing" "0 [] [] null 1" "$(( $(d1q "SELECT COUNT(*) AS n FROM messages" .n) - m0 )) $(content "$OLD")"
+  n0=$(d1q "SELECT COUNT(*) AS n FROM ring_log WHERE workspace_id = 'default'" .n); m0=$(d1q "SELECT COUNT(*) AS n FROM messages" .n)
+  call POST /v1/send "$KC" "{\"to\":[\"grokbot\"],\"subject\":\"s\",\"body\":\"b\",\"idempotency_key\":\"$IK\"}"; sleep 1
+  row "18c a retry with the same idempotency_key after the scrub: still the original, no new row, no ring" "200 true yes 0 0" \
+    "$STATUS $(j .duplicate) $([[ $(j .message.id) == "$OLD" ]] && echo yes || echo no) $(( $(d1q "SELECT COUNT(*) AS n FROM messages" .n) - m0 )) $(( $(d1q "SELECT COUNT(*) AS n FROM ring_log WHERE workspace_id = 'default'" .n) - n0 ))"
+  call POST /v1/send "$KC" "{\"to\":[\"grokbot\"],\"subject\":\"s18\",\"body\":\"b\",\"thread_id\":\"thr_$OLD\"}"; a="$STATUS $(j .message.hop_count)"
+  call POST /v1/send "$KM" "{\"to\":[\"claude\"],\"subject\":\"s18\",\"body\":\"b\",\"thread_id\":\"thr_$OLD\"}"; b="$STATUS $(j .error)"
+  call GET '/v1/inbox?unread=1' "$KG" ""
+  row "18d the scrubbed message still counts: its sender stays in the thread, the hop count holds, an outsider is still refused" "201 1 / 403 not_in_thread" "$a / $b"
+  FF=$(printf 'fil_%026d' "$T18"); LIVE="msg_live$T18"; aged "$LIVE" -5
+  d1 "INSERT INTO files (workspace_id, id, uploader, name, content_type, size, sha256, state, created_at, expires_at) VALUES ('default', '$FF', 'claude', 'n.txt', 'text/plain', 1, NULL, 'ready', '$(ago 40)', '$(ago -5)')"
+  d1 "INSERT INTO message_files (workspace_id, message_id, file_id) VALUES ('default', '$OLD', '$FF'), ('default', '$LIVE', '$FF')"
+  d1 "UPDATE messages SET body = 'to scrub again' WHERE id = '$OLD'"; daily >/dev/null
+  d1 "INSERT OR REPLACE INTO agent_capabilities (workspace_id, agent_id, capability, granted, updated_at) VALUES ('default', 'grokbot', 'files', 1, '$(ago 0)')"
+  call GET "/v1/files/$FF/meta" "$KG" ""
+  row "18e a file on a scrubbed message and a live one: still readable through the live one, nothing about it changes" "200 2 scrubbed" \
+    "$STATUS $(d1q "SELECT COUNT(*) AS n FROM message_files WHERE file_id = '$FF'" .n) $(d1q "SELECT body FROM messages WHERE id = '$OLD'" 'if .body == "" then "scrubbed" else "kept" end')"
+  d1 "DELETE FROM message_files WHERE file_id = '$FF'"; d1 "DELETE FROM files WHERE id = '$FF'"
+  d1 "INSERT INTO ring_log (workspace_id, agent, kind, status, message_ids, at) VALUES ('default', 'grokbot', 'none', 'chk-old', '[]', '$(ago 31)'), ('default', 'grokbot', 'none', 'chk-new', '[]', '$(ago 29)')"
+  d1 "INSERT INTO echo_hits (at, auth_present, body) VALUES ('$(ago 2)', 0, 'chk-old')"
+  d1 "INSERT INTO agent_events (workspace_id, agent_id, at, kind, detail) VALUES ('default', 'grokbot', '$(ago 400)', 'chk-old', 'x')"
+  daily >/dev/null
+  row "18f ring_log past 30 days and echo_hits past a day go; newer ring_log stays; agent_events are never touched" "0 1 0 1" \
+    "$(d1q "SELECT COUNT(*) AS n FROM ring_log WHERE status = 'chk-old'" .n) $(d1q "SELECT COUNT(*) AS n FROM ring_log WHERE status = 'chk-new'" .n) $(d1q "SELECT COUNT(*) AS n FROM echo_hits WHERE body = 'chk-old'" .n) $(d1q "SELECT COUNT(*) AS n FROM agent_events WHERE kind = 'chk-old'" .n)"
+  d1 "DELETE FROM ring_log WHERE status = 'chk-new'"; d1 "DELETE FROM agent_events WHERE kind = 'chk-old'"
+  if [[ -n ${BOTLINE_NOFILES_BASE:-} ]]; then
+    OFF="msg_off$T18"; aged "$OFF" 8; curl -s -o /dev/null "${BOTLINE_NOFILES_BASE%/}$DAILY"; sleep 1
+    row "18g RETENTION_DAYS=off keeps content" "[secret subject] [secret body]" "$(content "$OFF" | cut -d' ' -f1-5)"
+    d1 "DELETE FROM receipts WHERE message_id = '$OFF'"; d1 "DELETE FROM messages WHERE id = '$OFF'"
+  fi
+  for x in "$OLD" "$NEW" "$LIVE"; do d1 "DELETE FROM receipts WHERE message_id = '$x'"; d1 "DELETE FROM messages WHERE id = '$x'"; done
+else
+  echo "note: $R18_NOTE" >&2
+fi
+
+# 19. Table
 echo "| step | expected | actual | result |"
 echo "|---|---|---|---|"
 printf '%s\n' "${ROWS[@]}"
 echo
-echo "steps: ${#ROWS[@]}  failed: $FAILS  base: $BASE  $TS_NOTE  $NF_NOTE  $SW_NOTE  $UM_NOTE  $GT_NOTE  ${D14_NOTE:-}  ${UM15_NOTE:-}  $R16_NOTE  at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "steps: ${#ROWS[@]}  failed: $FAILS  base: $BASE  $TS_NOTE  $NF_NOTE  $SW_NOTE  $UM_NOTE  $GT_NOTE  ${D14_NOTE:-}  ${UM15_NOTE:-}  $R16_NOTE  $R18_NOTE  at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 [[ $FAILS -eq 0 ]]

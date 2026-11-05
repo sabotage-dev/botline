@@ -17,6 +17,7 @@ export interface Env {
   FILE_UNATTACHED_HOURS?: string; // limits for files (src/files.ts limits())
   RERING?: Queue<RingJob>; // v0.4, optional: scheduled re-rings (busy doorbells, the end of a backoff); see src/doorbell.ts
   STATUS_ACK_OVERDUE_MIN?: string; STATUS_REPLY_OVERDUE_MIN?: string; // v0.6: when an open ack or reply reads overdue (default 60)
+  RETENTION_DAYS?: string; // v0.6: days after expiry a message's content is scrubbed (default 7; "off" keeps it)
 }
 
 export interface AgentRow {

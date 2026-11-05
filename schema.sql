@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS messages (
   UNIQUE (workspace_id, from_agent, idempotency_key)
 );
 CREATE INDEX IF NOT EXISTS messages_thread ON messages (workspace_id, thread_id, created_at);
+CREATE INDEX IF NOT EXISTS messages_scrub ON messages (expires_at) WHERE body <> ''; -- v0.6: content still to retire (retention.ts)
 
 CREATE TABLE IF NOT EXISTS receipts (
   workspace_id TEXT NOT NULL DEFAULT 'default',
