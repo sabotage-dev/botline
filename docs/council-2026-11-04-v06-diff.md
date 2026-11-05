@@ -27,6 +27,17 @@ Two SHIP verdicts sat over three real defects. The dissenting leg was right on a
 
 A ring accepted mid-run and then swallowed leaves mail unread; the agent's last call came after the ring, so the silence gate never re-rings it. Codex and grok: keep the gate, because the alternative risks running a held task twice. Sonnet: replace it with "seen in the last N minutes", because the loss is silent and any keyed call defeats the gate. **Kept (2-1).** The mail stays unread and shows as outstanding on `/owner`, and the next send rings it.
 
+## Round 2 (2026-11-05, 07:58–08:10Z): the fold only
+
+Root: `git archive 29283cf`, `FOLD.diff` from `1551836`, NONCE `BOTLINE-V06-FOLD-D8697D668E`. Ratified from the records as above: codex `gpt-6.1-sol` / `high` read-only (`…01a1aab7-ce23-7622-a634-b225eb80731b`), `grok-20261105075854-e8r0t.json` `grok-4.7` with `touched: []`, the Sonnet 5.5 subagent. All three: findings 1–3 CLOSED. Grok and sonnet APPROVE; codex CHANGES-REQUIRED.
+
+| # | Finding | Filed by | Disposition |
+|---|---|---|---|
+| 4 | A malformed deploy-file line such as `OWNER_KEY:value` has no `=`, so the error printed the whole line, secret included | codex (sonnet: noted as a rough edge) | **Adopted.** The error names the line number. Row m11. |
+| 5 | m10 runs `--dry-run` and reads names, so removing the forwarding from the deploy command would still pass | codex | **Adopted.** Row m12 runs the real path against a stand-in `npx` and compares what `wrangler deploy` receives, values and colons included. |
+
+Noted, not owed: two unconditional `touch` writes can land out of order, and the gate reads a ring's completion time, so an agent that peeks while a slow fetch is open can look silent. Each needs a peek-and-hold agent plus a race inside one ring; neither has been seen, and neither was raised as a defect of the delta.
+
 ## Blocker call
 
-Findings 1–3 are fixed. They are reviewed in round 2, on `FOLD.diff` only.
+Findings 1–5 are fixed. Findings 4 and 5 are reviewed in round 3, on their delta only.

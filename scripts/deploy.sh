@@ -18,10 +18,12 @@ DRY=0; MODE=--remote
 for a in "$@"; do case "$a" in --dry-run) DRY=1 ;; --local) MODE=--local ;; *) echo "usage: scripts/deploy.sh [--dry-run] [--local]" >&2; exit 2 ;; esac; done
 ENVF=${BOTLINE_DEPLOY_ENV:-$HOME/.config/botline/deploy.env}
 [[ -r $ENVF ]] || { echo "deploy.sh: no $ENVF (see the header of this script)" >&2; exit 1; }
-VARS=(); NAMES=(); HOSTS=""
+VARS=(); NAMES=(); HOSTS=""; N=0
 while IFS= read -r line || [[ -n $line ]]; do
+  N=$((N + 1))
   [[ $line =~ ^[[:space:]]*(#|$) ]] && continue
-  [[ $line =~ ^([A-Z][A-Z0-9_]*)=(.*)$ ]] || { echo "deploy.sh: not NAME=value in $ENVF: ${line%%=*}" >&2; exit 1; }
+  # The line number only: a malformed line may be a secret pasted the wrong way.
+  [[ $line =~ ^([A-Z][A-Z0-9_]*)=(.*)$ ]] || { echo "deploy.sh: line $N of $ENVF is not NAME=value" >&2; exit 1; }
   name=${BASH_REMATCH[1]}; value=${BASH_REMATCH[2]}
   case "$name" in OWNER_KEY | DOORBELL_MASTER_KEY | RESEND_API_KEY | TURNSTILE_SECRET | ECHO_SECRET)
     echo "deploy.sh: $name is a secret: wrangler secret put $name, not $ENVF" >&2; exit 1 ;; esac
