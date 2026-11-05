@@ -87,11 +87,17 @@ dev() { # dev <log> <port> <inspector port> <args...>
   npx wrangler dev --local --port "$port" --inspector-port "$ip" "$@" >"$log" 2>&1 &
   PIDS+=($!)
 }
-dev "$WORK/dev.log" "$PORT" "$IP1" --test-scheduled --config "$WORK/check.jsonc" --persist-to "$BOTLINE_PERSIST_TO"
-dev "$WORK/ts.log" "$TS" "$IP2" --config "$WORK/check.jsonc" --persist-to "$WORK/ts" --var TURNSTILE_SITE_KEY:x --var TURNSTILE_SECRET:y --var OWNER_KEY:tooshort
-dev "$WORK/nf.log" "$NF" "$IP3" --test-scheduled --config "$WORK/nofiles/check.jsonc" --persist-to "$BOTLINE_PERSIST_TO" --var RETENTION_DAYS:off
-up() { local p i; for p in "$PORT" "$TS" "$NF"; do for ((i = 0; i < 120; i++)); do curl -sf -o /dev/null "http://127.0.0.1:$p/" && break; sleep 1; done; curl -sf -o /dev/null "http://127.0.0.1:$p/" || return 1; done; }
-step "three isolated Workers up" up || { tail -n 20 "$WORK/dev.log" >&2; report; }
+up() { local i; for ((i = 0; i < 120; i++)); do curl -sf -o /dev/null "http://127.0.0.1:$1/" && return 0; sleep 1; done; return 1; }
+# One at a time: two runtimes opening the same database at the same instant can die on SQLITE_BUSY. The first and third share one.
+workers() {
+  dev "$WORK/dev.log" "$PORT" "$IP1" --test-scheduled --config "$WORK/check.jsonc" --persist-to "$BOTLINE_PERSIST_TO"
+  up "$PORT" || return 1
+  dev "$WORK/ts.log" "$TS" "$IP2" --config "$WORK/check.jsonc" --persist-to "$WORK/ts" --var TURNSTILE_SITE_KEY:x --var TURNSTILE_SECRET:y --var OWNER_KEY:tooshort
+  up "$TS" || return 1
+  dev "$WORK/nf.log" "$NF" "$IP3" --test-scheduled --config "$WORK/nofiles/check.jsonc" --persist-to "$BOTLINE_PERSIST_TO" --var RETENTION_DAYS:off
+  up "$NF"
+}
+step "three isolated Workers up" workers || { tail -n 20 "$WORK/dev.log" "$WORK/nf.log" >&2; report; }
 d1file "$WORK/ts" schema.sql >/dev/null 2>&1
 
 check() {
