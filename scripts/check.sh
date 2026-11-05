@@ -45,7 +45,9 @@
 #      Section 18 (v0.6: retention) plants aged rows with SQL and fires the daily Cron, so it too runs only with --local and
 #      --test-scheduled. BOTLINE_NOFILES_BASE, started with --test-scheduled --var RETENTION_DAYS:off, adds the off row.
 #      Section 19 (v0.6: the owner's view) needs OWNER_KEY here equal to the Worker's (unset: skipped, and the summary says so).
-#      BOTLINE_NOFILES_BASE, without OWNER_KEY, adds the 404 row. Run it with --local: it adds a workspace with SQL.
+#      BOTLINE_NOFILES_BASE, without OWNER_KEY, adds the 404 row; BOTLINE_TURNSTILE_BASE, with --var OWNER_KEY:tooshort, the
+#      short-key row. Run it with --local: it adds a workspace with SQL.
+#      Section 20 (v0.6: the dead-letter alert) needs BOTLINE_DEV_LOG, the file the Worker's log goes to (unset: skipped).
 #      Cleanup failures are printed as `warning: cleanup: …` lines on stderr.
 # Requires curl, jq, python3. Prints a markdown table; exits 1 if any step fails. Never prints a key.
 set -uo pipefail
@@ -1355,7 +1357,7 @@ if [[ $MODE == --local && $(curl -s -o /dev/null -w '%{http_code}' "$BASE$DAILY"
   d1 "DELETE FROM ring_log WHERE status = 'chk-new'"; d1 "DELETE FROM agent_events WHERE kind = 'chk-old'"
   if [[ -n ${BOTLINE_NOFILES_BASE:-} ]]; then
     OFF="msg_off$T18"; aged "$OFF" 8; curl -s -o /dev/null "${BOTLINE_NOFILES_BASE%/}$DAILY"; sleep 1
-    row "18g RETENTION_DAYS=off keeps content" "[secret subject] [secret body]" "$(content "$OFF" | cut -d' ' -f1-5)"
+    row "18g RETENTION_DAYS=off keeps content" "[secret subject] [secret body]" "$(content "$OFF" | cut -d' ' -f1-4)"
     d1 "DELETE FROM receipts WHERE message_id = '$OFF'"; d1 "DELETE FROM messages WHERE id = '$OFF'"
   fi
   for x in "$OLD" "$NEW" "$LIVE"; do d1 "DELETE FROM receipts WHERE message_id = '$x'"; d1 "DELETE FROM messages WHERE id = '$x'"; done
@@ -1419,14 +1421,52 @@ if [[ $MODE == --local && -n ${OWNER_KEY:-} ]]; then
     a=$(curl -s -o /dev/null -w '%{http_code}' "${BOTLINE_NOFILES_BASE%/}/owner"); b=$(curl -s -o /dev/null -w '%{http_code}' -H "authorization: Bearer $KO" "${BOTLINE_NOFILES_BASE%/}/v1/owner/overview")
     row "19k a deployment without OWNER_KEY: both 404, the key is no use" "404 404" "$a $b"
   fi
+  if [[ -n ${BOTLINE_TURNSTILE_BASE:-} ]]; then # that twin runs with --var OWNER_KEY:tooshort
+    a=$(curl -s -o /dev/null -w '%{http_code}' "${BOTLINE_TURNSTILE_BASE%/}/owner"); b=$(curl -s -o /dev/null -w '%{http_code}' -H "authorization: Bearer tooshort" "${BOTLINE_TURNSTILE_BASE%/}/v1/owner/overview")
+    row "19l an OWNER_KEY under 32 characters counts as none: both 404, even with that key" "404 404" "$a $b"
+  fi
 else
   echo "note: $R19_NOTE" >&2
 fi
 
-# 20. Table
+# 20. The one alert (v0.6, docs/plan-v0.6.md T6): the transition to dead-letter, once, ids and a reason only.
+R20_NOTE="alert rows: skipped (BOTLINE_DEV_LOG unset, or not --local)"
+if [[ $MODE == --local && -n ${BOTLINE_DEV_LOG:-} ]]; then
+  R20_NOTE="alert rows: ran"
+  deadn() { grep -c '"event":"dead_letter"' "$BOTLINE_DEV_LOG"; }
+  (cd "$ROOT" && node scripts/doorbell-set.mjs muse generic_webhook "$BASE/v1/_echo" "wrong-$RANDOM" "$MODE" >/dev/null 2>&1)
+  d1 "UPDATE rings SET fail_count = 3, lease_until = NULL, in_flight_since = NULL WHERE workspace_id = 'default' AND agent = 'muse'"
+  n0=$(deadn); call POST /v1/send "$KC" '{"to":["muse"],"subject":"s20 4th","body":"x"}'; sleep 2; a=$(( $(deadn) - n0 ))
+  d1 "UPDATE rings SET lease_until = NULL WHERE workspace_id = 'default' AND agent = 'muse'"
+  call POST /v1/send "$KC" '{"to":["muse"],"subject":"s20 5th","body":"x"}'; sleep 2; b=$(( $(deadn) - n0 ))
+  d1 "UPDATE rings SET lease_until = NULL WHERE workspace_id = 'default' AND agent = 'muse'"
+  call POST /v1/send "$KC" '{"to":["muse"],"subject":"s20 6th","body":"x"}'; sleep 2; c=$(( $(deadn) - n0 ))
+  line=$(grep '"event":"dead_letter"' "$BOTLINE_DEV_LOG" | tail -1)
+  row "20a the alert fires on the fifth failure only, once, naming the agent and reason, with no URL or secret" "0 1 1 muse http-401 clean" \
+    "$a $b $c $(jq -r .agent_id <<<"$line") $(jq -r '.failure_reason | gsub(" "; "-")' <<<"$line") $(grep -qE '_echo|wrong-|http://' <<<"$line" && echo leaked || echo clean)"
+  a=$(cd "$ROOT" && node --input-type=module -e '
+import { deadLetter } from "./src/alerts.ts";
+const calls = []; console.log = () => {}; console.error = () => {};
+globalThis.fetch = async (u, o) => { calls.push({ u, b: JSON.parse(o.body) }); return new Response("{}"); };
+const env = { OWNER_ALERT_TO: "o@x.invalid", RESEND_API_KEY: "k", WAITLIST_FROM: "b <f@x.invalid>" };
+await deadLetter(env, "default", "grokbot", "http 401");
+await deadLetter({ ...env, OWNER_ALERT_TO: "" }, "default", "grokbot", "http 401");
+await deadLetter({ ...env, RESEND_API_KEY: undefined }, "default", "grokbot", "http 401");
+globalThis.fetch = async () => { throw new Error("down"); };
+await deadLetter(env, "default", "grokbot", "http 401");
+process.stdout.write([calls.length, calls[0].u, calls[0].b.to[0], calls[0].b.text.includes("grokbot"), calls[0].b.text.includes("doorbell-set")].join(" "));' 2>/dev/null)
+  row "20b mail: to OWNER_ALERT_TO through Resend, naming the agent and the fix; no address or no key: no mail; a mail failure does not throw" \
+    "1 https://api.resend.com/emails o@x.invalid true true" "$a"
+  call GET '/v1/inbox?unread=1' "$KM" ""; d1 "UPDATE rings SET fail_count = 0, lease_until = NULL, in_flight_since = NULL WHERE workspace_id = 'default' AND agent = 'muse'"
+  (cd "$ROOT" && node scripts/doorbell-set.mjs muse none - "$MODE" >/dev/null 2>&1)
+else
+  echo "note: $R20_NOTE" >&2
+fi
+
+# 21. Table
 echo "| step | expected | actual | result |"
 echo "|---|---|---|---|"
 printf '%s\n' "${ROWS[@]}"
 echo
-echo "steps: ${#ROWS[@]}  failed: $FAILS  base: $BASE  $TS_NOTE  $NF_NOTE  $SW_NOTE  $UM_NOTE  $GT_NOTE  ${D14_NOTE:-}  ${UM15_NOTE:-}  $R16_NOTE  $R18_NOTE  $R19_NOTE  at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "steps: ${#ROWS[@]}  failed: $FAILS  base: $BASE  $TS_NOTE  $NF_NOTE  $SW_NOTE  $UM_NOTE  $GT_NOTE  ${D14_NOTE:-}  ${UM15_NOTE:-}  $R16_NOTE  $R18_NOTE  $R19_NOTE  $R20_NOTE  at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 [[ $FAILS -eq 0 ]]

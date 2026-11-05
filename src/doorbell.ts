@@ -18,6 +18,7 @@
 // destination since fixed, a 2xx whose run died. It rings through the same attempt(), so the lease, backoff and dead-letter
 // rules are the ones above. It only ever wakes an agent for mail nobody has claimed, so no instruction is resubmitted.
 // Core holds no vendor logic: adapters do (including which destinations they accept and what "busy" looks like).
+import { deadLetter } from "./alerts";
 import { controllersOf, delegationOn, type AgentRow, type Env, type Message } from "./store";
 import { openSecret } from "./secrets";
 import * as claude_fire from "./adapters/claude_fire";
@@ -323,6 +324,7 @@ async function afterClaim(
       log(status, ids, http, detail),
     ]);
     const old = claimed.fail_count ?? 0;
+    if (u.meta.changes && old + 1 === DEAD_AT) await deadLetter(env, ws, agentId, detail);
     if (u.meta.changes && old + 1 < DEAD_AT && canSchedule(env))
       await schedule(env, ws, agentId, kind, Math.min(BACKOFF_BASE_MIN << Math.min(old, 20), BACKOFF_CAP_MIN) * 60 + 1, "after_backoff");
   };

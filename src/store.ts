@@ -19,6 +19,7 @@ export interface Env {
   STATUS_ACK_OVERDUE_MIN?: string; STATUS_REPLY_OVERDUE_MIN?: string; // v0.6: when an open ack or reply reads overdue (default 60)
   RETENTION_DAYS?: string; // v0.6: days after expiry a message's content is scrubbed (default 7; "off" keeps it)
   OWNER_KEY?: string; // v0.6, Workers Secret: opens /owner and /v1/owner/* (src/owner.ts). Unset or short: they answer 404
+  OWNER_ALERT_TO?: string; // v0.6: where the dead-letter mail goes (src/alerts.ts); empty = the log line only
 }
 
 export interface AgentRow {
@@ -51,7 +52,7 @@ export class ApiError extends Error {
   }
 }
 
-export const VERSION = "0.5.0-pre";
+export const VERSION = "0.6.0-pre";
 export type Args = Record<string, unknown>;
 // v0.4 (docs/plan-delegation-v0.4.md P9): one neutral text for every workspace. Where delegation is off, trust is never
 // "controller", so every body stays data, as before.

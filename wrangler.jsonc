@@ -1,4 +1,4 @@
-// botline v0.5-pre. Secrets (never in this file): DOORBELL_MASTER_KEY, RESEND_API_KEY (waitlist mail), TURNSTILE_SECRET
+// botline v0.6-pre. Secrets (never in this file): DOORBELL_MASTER_KEY, OWNER_KEY (/owner), RESEND_API_KEY (mail), TURNSTILE_SECRET
 // (waitlist bot check), ECHO_SECRET (check.sh only) via `npx wrangler secret put <NAME>`; locally via .dev.vars (gitignored).
 {
   "$schema": "node_modules/wrangler/config-schema.json",
@@ -63,6 +63,8 @@
     "STATUS_ACK_OVERDUE_MIN": "60",
     "STATUS_REPLY_OVERDUE_MIN": "60",
     // Days after a message expires that its subject, body and meta are removed; the row stays (src/retention.ts). "off" keeps them.
-    "RETENTION_DAYS": "7"
+    "RETENTION_DAYS": "7",
+    // Address for the one alert, a doorbell reaching dead-letter (src/alerts.ts). Needs RESEND_API_KEY and WAITLIST_FROM.
+    "OWNER_ALERT_TO": ""
   }
 }

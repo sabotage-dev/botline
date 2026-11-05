@@ -1,4 +1,4 @@
--- botline schema (v0.5-pre). Every table carries workspace_id (Phase 1 always 'default').
+-- botline schema (v0.6-pre). Every table carries workspace_id (Phase 1 always 'default').
 -- The full fresh-install definition. Idempotent and non-destructive: safe to re-run against a live database.
 -- An existing database also needs `node scripts/migrate.mjs` (adds columns that CREATE IF NOT EXISTS cannot).
 

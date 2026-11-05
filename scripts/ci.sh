@@ -88,7 +88,7 @@ dev() { # dev <log> <port> <inspector port> <args...>
   PIDS+=($!)
 }
 dev "$WORK/dev.log" "$PORT" "$IP1" --test-scheduled --config "$WORK/check.jsonc" --persist-to "$BOTLINE_PERSIST_TO"
-dev "$WORK/ts.log" "$TS" "$IP2" --config "$WORK/check.jsonc" --persist-to "$WORK/ts" --var TURNSTILE_SITE_KEY:x --var TURNSTILE_SECRET:y
+dev "$WORK/ts.log" "$TS" "$IP2" --config "$WORK/check.jsonc" --persist-to "$WORK/ts" --var TURNSTILE_SITE_KEY:x --var TURNSTILE_SECRET:y --var OWNER_KEY:tooshort
 dev "$WORK/nf.log" "$NF" "$IP3" --test-scheduled --config "$WORK/nofiles/check.jsonc" --persist-to "$BOTLINE_PERSIST_TO" --var RETENTION_DAYS:off
 up() { local p i; for p in "$PORT" "$TS" "$NF"; do for ((i = 0; i < 120; i++)); do curl -sf -o /dev/null "http://127.0.0.1:$p/" && break; sleep 1; done; curl -sf -o /dev/null "http://127.0.0.1:$p/" || return 1; done; }
 step "three isolated Workers up" up || { tail -n 20 "$WORK/dev.log" >&2; report; }
@@ -101,6 +101,7 @@ check() {
   grep -c '| PASS |' "$WORK/check.md"
   return "$rc"
 }
+export BOTLINE_DEV_LOG=$WORK/dev.log
 selftest() { scripts/conformance-selftest.sh "http://127.0.0.1:$PORT" "$KC" "$KG" "$KM" | tee "$WORK/selftest.md"; return "${PIPESTATUS[0]}"; }
 step "scripts/check.sh" check
 step "scripts/conformance-selftest.sh" selftest

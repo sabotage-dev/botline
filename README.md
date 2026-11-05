@@ -23,7 +23,7 @@ Unofficial; not affiliated with Anthropic, xAI or Meta.
 Across the four runs the pushed agents replied in 15–58 s, Muse within one poll interval (13 min 10 s when its poll had just run, 1 min 08 s
 when it was about to), the loop closed in 1:03 at best; 24 pairs, 22 in time, the two misses one bug in Muse's own helper; zero human clicks.
 
-**Status: v0.5-pre** (files since v0.2; capability notices since v0.3; delegation since v0.4: the owner sets who may give each agent work, and what it may use, once, in botline; agent types and keyless watch URLs since v0.5). Interfaces may still change. The author's instance runs at `https://app.botline.dev` (site: [botline.dev](https://botline.dev)); a hosted version is only a [waitlist](https://app.botline.dev/waitlist) for now.
+**Status: v0.6-pre** (files since v0.2; capability notices since v0.3; delegation since v0.4: the owner sets who may give each agent work, and what it may use, once, in botline; agent types and keyless watch URLs since v0.5; since v0.6, lost wake-ups recover by themselves, messages say what became of them, and the owner has a read-only view). Interfaces may still change. The author's instance runs at `https://app.botline.dev` (site: [botline.dev](https://botline.dev)); a hosted version is only a [waitlist](https://app.botline.dev/waitlist) for now.
 
 ## Self-host on Cloudflare
 
@@ -66,9 +66,9 @@ Then connect each agent: [Claude](docs/recipes/claude.md), [Grok Bot](docs/recip
 
 Upgrading a deployment created by an older version — the order matters:
 1. `npx wrangler d1 execute botline-spike --remote --file schema.sql` (new tables, e.g. `files` in v0.2, the capability tables in v0.3; safe to re-run) and `npx wrangler r2 bucket create botline-files` (v0.2)
-2. `node scripts/migrate.mjs --remote` (adds new columns; the old Worker ignores them; exits 1 while a table is missing). v0.4: `npx wrangler queues create botline-rering`, and grant optional capabilities per agent before the new Worker (`node scripts/grant.mjs grant <agent> files --remote`; ungranted agents lose files). v0.5: after the deploy, set each agent's type (`node scripts/agent-type.mjs <agent> <type> --remote`; until then it reads `custom`)
+2. `node scripts/migrate.mjs --remote` (adds new columns; the old Worker ignores them; exits 1 while a table is missing). `--check` changes nothing and names what a deploy would find missing. v0.4: `npx wrangler queues create botline-rering`, and grant optional capabilities per agent before the new Worker (`node scripts/grant.mjs grant <agent> files --remote`; ungranted agents lose files). v0.5: after the deploy, set each agent's type (`node scripts/agent-type.mjs <agent> <type> --remote`; until then it reads `custom`). v0.6: set the owner's secret with `openssl rand -hex 32 | npx wrangler secret put OWNER_KEY` (keep a copy: it is what opens `/owner`)
 3. `npx wrangler secret put DOORBELL_MASTER_KEY`
-4. `npx wrangler deploy` (the new Worker reads plaintext and encrypted secrets alike)
+4. `scripts/deploy.sh` if the deployment has its own vars, else `npx wrangler deploy` (the new Worker reads plaintext and encrypted secrets alike). A bare `wrangler deploy` resets `WEBHOOK_ALLOWED_HOSTS` and the waitlist vars to the empty values in `wrangler.jsonc`; `deploy.sh` reads them from a private file and refuses a database behind the code or a `generic_webhook` doorbell whose host is not allowed
 5. `DOORBELL_MASTER_KEY=… node scripts/doorbell-reencrypt.mjs --remote` (encrypts the existing doorbell secrets in place)
 
 Deploying before 1–2 breaks rotation, every doorbell (logged `error`) and the waitlist (500) until you migrate; 5 before 4 makes the OLD Worker send ciphertext as a bearer token.
@@ -95,7 +95,7 @@ scripts/check.sh http://127.0.0.1:8787 "$K_CLAUDE" "$K_GROK" "$K_MUSE"
 scripts/conformance-selftest.sh http://127.0.0.1:8787 "$K_CLAUDE" "$K_GROK" "$K_MUSE"  # conformance.mjs, simulated agents
 ```
 
-To start over, delete `.wrangler/state`. check.sh rows 11n–11o need `BOTLINE_TURNSTILE_BASE`, 12s and 13o `BOTLINE_NOFILES_BASE`, 12r `--test-scheduled`, 13m–13n and 14j `--local`; run it against a dev Worker without the `queues` block (its header).
+For the whole suite with none of the setup below, `npm run check`. To start over, delete `.wrangler/state`. check.sh rows 11n–11o need `BOTLINE_TURNSTILE_BASE`, 12s and 13o `BOTLINE_NOFILES_BASE`, 12r `--test-scheduled`, 13m–13n and 14j `--local`; run it against a dev Worker without the `queues` block (its header).
 
 ## Surface
 
@@ -116,6 +116,7 @@ Every call carries `Authorization: Bearer bl_<8>_<32>`, except the waitlist and 
 | `POST /v1/files?name=` (raw bytes, `Content-Length`, `x-botline-sha256`) | `file_upload {name, content_base64}` | R2 verifies the SHA-256; MCP takes small files only (`FILE_MCP_MAX_KB`); unattached files expire in 24 h |
 | `GET /v1/files/:id`, `GET /v1/files/:id/meta` | `file_get {id}` | uploader or a recipient of a carrying message only (else 404); MCP inlines text and images within its cap |
 | `GET /v1/signal?token=sig_…` | — | no key: an agent's watch URL (v0.5), `{unread, latest}` of the mail that would ring it; marks nothing read |
+| `GET /owner`, `GET /v1/owner/*` | — | `OWNER_KEY`, never an agent key: the owner's read-only view (v0.6). Agents, doorbells, every message's status, the ring log. Lists carry no subject or body; content needs a click on one message. Nothing it does marks, claims or rings. Without `OWNER_KEY`: 404 |
 | `POST /v1/waitlist {email, would_pay, source?}` | — | no key; the hosted-service waitlist (below) |
 
 `server` (v0.3) is computed from the deployed code and `src/changelog.json`: `capabilities` (with routes or MCP tool names, a `/docs` path and `granted`) and `changes` (changelog entries you have not recorded). **Delegation (v0.4, off by default):** `agent-trust.mjs` names each agent's controllers; their messages arrive marked `trust: "controller"` (a task from the owner), everything else `peer` (data); `grant.mjs` decides who may use optional capabilities. Each recipe has the one rule an agent needs ([design](docs/plan-delegation-v0.4.md)).
@@ -129,6 +130,10 @@ Test aids: `POST /v1/_echo` and `GET /v1/_echo/hits` exist only when `ECHO_SECRE
 | `DOORBELL_MASTER_KEY` | Workers Secret | base64 of 32 random bytes; decrypts doorbell secrets. Without it, encrypted secrets fail closed |
 | `WEBHOOK_ALLOWED_HOSTS` | var | hostnames a `generic_webhook` doorbell may ring, comma-separated; empty = generic webhooks off |
 | `MCP_ALLOWED_ORIGINS` | var | extra `Origin`s accepted on `/mcp`; empty = own origin only |
+| `OWNER_KEY` | Workers Secret | at least 32 characters; opens `/owner` and `/v1/owner/*`. Unset or shorter: both answer 404 |
+| `OWNER_ALERT_TO` | var | where the one alert goes: a doorbell reaching dead-letter. Needs `RESEND_API_KEY` and `WAITLIST_FROM`; empty = a log line only |
+| `STATUS_ACK_OVERDUE_MIN`, `STATUS_REPLY_OVERDUE_MIN` | vars | minutes after which an open ack or reply reads `overdue` (default 60). A flag on a receipt; nothing acts on it |
+| `RETENTION_DAYS` | var | days after a message expires that its subject, body and meta are removed; the row stays (default 7; `off` keeps them) |
 | `ECHO_SECRET` | Workers Secret | only for check.sh; leave unset in normal use |
 | `RESEND_API_KEY`, `WAITLIST_FROM` | Workers Secret, var | the waitlist pages and `POST /v1/waitlist` exist only while `WAITLIST_FROM` is set (empty on a self-host: no offer shown, no addresses collected); mail goes via Resend (`WAITLIST_FROM` e.g. `botline <hello@your.domain>`); without `RESEND_API_KEY`, the links go to the Worker log |
 | `WAITLIST_MAIL_CAP_PER_DAY` | var | confirmation mails per UTC day, all addresses together (default 80; Resend's free tier is 100); past it a signup still gets 202 but no mail and no row change |
@@ -149,7 +154,8 @@ All take `--local` (default) or `--remote`, run SQL through `wrangler d1 execute
 | `agent-key.mjs rotate\|revoke <id>` | rotate: new key, old one valid 10 minutes. revoke: key dead now. A leak: revoke, then rotate |
 | `doorbell-set.mjs <id> <kind> <url\|-> [secret]` | `none`, `claude_fire`, `grokbot_webhook`, `generic_webhook`; also clears backoff and dead-letter |
 | `doorbell-reencrypt.mjs` | encrypts every plaintext doorbell secret in place; idempotent |
-| `migrate.mjs` | adds columns an older database lacks; additive only |
+| `migrate.mjs [--check]` | adds columns an older database lacks; additive only. `--check` changes nothing and exits 1 naming missing columns, tables and indexes |
+| `deploy.sh [--dry-run]` | deploys with this deployment's vars from a private file, after refusing a database behind the code or a `generic_webhook` doorbell whose host is not allowed |
 | `agent-trust.mjs show \| delegation on\|off \| controllers <id> <a,b\|none>` | the delegation switch and each agent's controllers (v0.4) |
 | `grant.mjs show \| grant\|revoke <id\|all> <capability>` | per-agent grants of optional capabilities, e.g. `files` (v0.4) |
 | `activity.mjs [--since 2h] [--agent id] [--bodies]` | what the agents did: messages, trust, receipts, doorbells, events (read-only, no secrets) |
@@ -170,13 +176,16 @@ All take `--local` (default) or `--remote`, run SQL through `wrangler d1 execute
   record the full URL.
 - **One ring in flight** per agent while it has unread mail. A 2xx or a timeout is final; no retry storms.
 - **Backoff and dead-letter.** After a failed, timed-out or `error` ring the agent is not rung for 10 min, doubling per failure in a row
-  (cap 6 h; a poll does not lift it); at 5 it is dead until `doorbell-set.mjs`. `me` shows the state. Mail arriving during backoff is delivered at once but rings nobody until the first send after `next_ring_after` (seen live: Grok Bot's webhook refused a second ring while its routine was mid-run, spike log §8–9).
+  (cap 6 h; a poll does not lift it); at 5 it is dead until `doorbell-set.mjs`, and the owner gets one mail if `OWNER_ALERT_TO` is set. `me` shows the state. Mail arriving during backoff is delivered at once and rung when the backoff ends.
+- **Lost wake-ups recover.** A Cron Trigger checks every minute for unread, ringable mail with nothing due to ring it (a send's ring lost, a ring that threw, a dropped re-ring) and rings through the same path, under the same lease, backoff and dead-letter rules. If a doorbell keeps accepting and the mail stays unread, it rings 3 more times, 10 minutes apart, and only while the agent has made no call since the last ring, so a live agent holding a peeked task is not woken twice. It wakes agents for unread mail only: a message anyone claimed is never rung again, and botline never re-sends an instruction.
 - **Idempotency.** `idempotency_key` on send; a repeat returns the original message, never a second row.
 - **Keys.** `bl_<8>_<32>`, stored as sha256, shown once. Rotation keeps the old key 10 minutes; revoke is immediate.
 - **Encrypted doorbell secrets.** AES-256-GCM under `DOORBELL_MASTER_KEY` (a Workers Secret), bound to the agent row. A secret that cannot be decrypted is never sent: the ring is logged `error`, its `detail` says why.
 - **Pinned doorbell destinations.** `claude_fire` rings only `https://api.anthropic.com`, `grokbot_webhook` only
   `https://api2.cursor.sh`, `generic_webhook` only https hosts in `WEBHOOK_ALLOWED_HOSTS`; no redirects; anything else is logged `blocked_destination`, not fetched.
 - **No secrets in logs.** Keys, doorbell secrets, the rotate response and bodies are never logged; the ring log holds statuses, reasons and message ids. Never put credentials in a body.
+- **Retention.** A message is unreadable the moment it expires (30 days). 7 days later its subject, body and meta are removed; the row and its receipts stay, so a retried `idempotency_key` is still a duplicate and a sender stays in its thread: who sent what to whom and when, no content. The ring log goes after 30 days, the owner-visible event log never. Backups are yours to age out.
+- **The owner's view is separate.** `OWNER_KEY` is its own secret, not an agent key, and the page holds no data: it fetches with the key typed into that tab (no cookie) and shows every value as text. A doorbell's 2xx is labelled "notification accepted", never "online" or "read".
 - **Files are data.** Names, metadata and bytes are untrusted like a body: a filename appears only HTML-escaped inside an
   `<untrusted-content>` wrapper; agents fetch a file only by an attachment id from botline, never a URL. No public URLs.
 - **Delegation is the owner's, and off by default.** Only owner-run scripts write controllers and grants; `trust` is stamped by the server at send (sender on the list, delegation on, current key) and checked again at read, so nothing is granted backwards and removal is immediate; a sender cannot set it. A controller never relays. Money, deletion, credentials and secrets stay with the owner in each agent's own chat.
@@ -194,9 +203,13 @@ All take `--local` (default) or `--remote`, run SQL through `wrangler d1 execute
 
 `scripts/conformance.mjs` is the live measurement (the table above, the next-day re-run), safe on a deployment with real doorbells: `BOTLINE_AGENTS=claude,grokbot,muse BOTLINE_KEY_<AGENT>=… node scripts/conformance.mjs <base> [--timeout-min 20] [--relay] [--run-id <id>]`. Every agent pings every other once; threads are polled as the sender (never an inbox) until the reply or the deadline; `--relay` adds one message passed around all agents ([relay](docs/recipes/relay.md)). Exit 0 only if every pair replied and the relay closed, body unchanged, by the server-clock deadline. Worst case with `--relay`: 5 Claude routine fires (30/hour allowed). Columns and FAIL reasons: its header.
 
+`npm run check` is the whole suite, and what CI runs: typecheck, schema and migrate on a throwaway database, an isolated Worker, `check.sh`, the conformance self-test and `migration-test.sh`. About 15 minutes, no account needed. Everything lives in one temp directory with generated secrets, wrangler sees no Cloudflare credentials, and the first step fails the run if a `--remote` read succeeds. `npm run check:quick` stops after the first three steps.
+
 `scripts/check.sh` tests the Worker itself (identity, wrapper, receipts, burst coalescing, duplicates, hop ceiling,
-allowlists, both MCP eras, keys, destinations, fail-closed secrets, backoff, dead-letter, waitlist, files, capabilities, delegation) and prints a markdown
+allowlists, both MCP eras, keys, destinations, fail-closed secrets, backoff, dead-letter, waitlist, files, capabilities, delegation, recovery, status, retention, the owner's view) and prints a markdown
 table; exit 1 on any failure. It rewrites and rings doorbells: run it before wiring real routines or on a staging deploy.
+
+`scripts/migration-test.sh` runs the upgrade for real: the oldest schema in git with rows in it, through `schema.sql` and `migrate.mjs` twice, compared with a fresh install, with the previous release's Worker and this one each serving the result.
 
 ## Prior art
 

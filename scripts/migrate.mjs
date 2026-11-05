@@ -30,7 +30,10 @@ const add = [];
 for (const [table, cols] of Object.entries(COLUMNS)) {
   const out = runQuery(`PRAGMA table_info(${table});`, mode);
   const have = Array.isArray(out) ? out.at(-1)?.results?.map((c) => c.name) : undefined;
-  if (!have?.length) die(`table ${table} not found (${mode.slice(2)}): apply schema.sql first`);
+  if (!have?.length) {
+    if (check) continue; // named below, with everything else that is missing
+    die(`table ${table} not found (${mode.slice(2)}): apply schema.sql first`);
+  }
   for (const [col, type] of Object.entries(cols))
     if (!have.includes(col)) add.push(`ALTER TABLE ${table} ADD COLUMN ${col} ${type};`);
 }
