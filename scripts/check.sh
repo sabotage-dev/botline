@@ -1189,14 +1189,19 @@ if [[ $MODE == --local && $(curl -s -o /dev/null -w '%{http_code}' "$TICK") == 2
   fresh16; lost; E0=$(hits); tick >/dev/null; sleep 1
   for i in 1 2 3 4 5; do expire; tick >/dev/null; sleep 1; done
   row "16l a 2xx each time, mail still unread, agent silent: 1 ring + 3 recoveries, a lease apart, then nothing on two more ticks" "4 ok reconcile 1" "$(( $(hits) - E0 )) $(lastring)"
-  lost; E0=$(hits); expire; tick >/dev/null; sleep 1
-  row "16m newer mail behind that stuck message is a new anchor: it rings" "1" "$(( $(hits) - E0 ))"
+  lost; E0=$(hits); expire; tick >/dev/null; sleep 1; a=$(( $(hits) - E0 ))
+  for i in 1 2 3 4 5; do expire; tick >/dev/null; sleep 1; done
+  row "16m newer mail behind that stuck message has its own budget: its ring, then its own 3 recoveries, then nothing" "1 4" "$a $(( $(hits) - E0 ))"
 
   fresh16; lost; E0=$(hits); tick >/dev/null; sleep 1
   call GET '/v1/inbox?peek=1' "$KM" ""; a=$(j .count); sleep 1; expire; tick >/dev/null; sleep 1
   b="$a $(( $(hits) - E0 )) $(d1q "SELECT read_at IS NULL AS u FROM receipts WHERE message_id = '$LOST'" .u)"
   d1 "UPDATE agents SET last_seen_at = NULL WHERE workspace_id = 'default' AND id = 'muse'"; tick >/dev/null; sleep 1
   row "16n the agent peeked after the ring (a peek writes nothing to the receipt): it is alive, so no second ring; silent again, the ring comes" "1 1 1 2" "$b $(( $(hits) - E0 ))"
+
+  fresh16; d1 "UPDATE agents SET last_seen_at = '$(stamp -1)' WHERE workspace_id = 'default' AND id = 'muse'"; lost; E0=$(hits); tick >/dev/null
+  call GET '/v1/inbox?peek=1' "$KM" ""; sleep 1; expire; tick >/dev/null; sleep 1
+  row "16n2 an agent active a second before the ring, peeking just after it, still counts as alive: no second ring" "1" "$(( $(hits) - E0 ))"
 
   fresh16; lost; d1 "DELETE FROM rings WHERE workspace_id = 'default' AND agent = 'muse'"; E0=$(hits); tick >/dev/null; sleep 1
   row "16o an agent that has never had a rings row is recovered" "1 ok reconcile 1" "$(( $(hits) - E0 )) $(lastring)"
@@ -1220,7 +1225,7 @@ if [[ $MODE == --local && $(curl -s -o /dev/null -w '%{http_code}' "$TICK") == 2
   fresh16; call GET /v1/me "$KM" ""; sleep 1
   a=$(d1q "SELECT last_seen_at AS t FROM agents WHERE id = 'muse'" .t); call GET /v1/me "$KM" ""; sleep 1; b=$(d1q "SELECT last_seen_at AS t FROM agents WHERE id = 'muse'" .t)
   fresh16; mcp "$KM" "{\"jsonrpc\":\"2.0\",\"id\":160,\"method\":\"tools/call\",\"params\":{$modern_meta,\"name\":\"me\",\"arguments\":{}}}"; sleep 1
-  row "16t last_seen_at: any keyed call stamps it, the next within 15 s writes nothing, MCP counts too" "stamped same stamped" \
+  row "16t last_seen_at: any keyed call stamps it, every later call moves it, MCP counts too" "stamped moved stamped" \
     "$([[ $a =~ ^20 ]] && echo stamped || echo "$a") $([[ $a == "$b" ]] && echo same || echo moved) $([[ $(d1q "SELECT last_seen_at AS t FROM agents WHERE id = 'muse'" .t) =~ ^20 ]] && echo stamped || echo none)"
 
   fresh16; lost; tick >/dev/null; sleep 1; LSCOL=1; d1 "ALTER TABLE agents RENAME COLUMN last_seen_at TO last_seen_chk"; expire; E0=$(hits); a=$(tick); sleep 1
@@ -1407,10 +1412,12 @@ if [[ $MODE == --local && -n ${OWNER_KEY:-} ]]; then
   for p in overview "messages?limit=50" rings "messages/$M19"; do own "$p"; done; sleep 1
   row "19h a full page load changes nothing: receipt, lease, ring log, last_seen_at" "same same 0 same" \
     "$([[ $(d1q "SELECT read_at IS NULL AS u, delivered_at IS NULL AS d, acked_at IS NULL AS a FROM receipts WHERE message_id = '$M19'" '"\(.u) \(.d) \(.a)"') == "$r0" ]] && echo same || echo moved) $([[ $(d1q "SELECT lease_until, fail_count, last_at FROM rings WHERE agent = 'grokbot'" '"\(.lease_until) \(.fail_count) \(.last_at)"') == "$g0" ]] && echo same || echo moved) $(( $(d1q "SELECT COUNT(*) AS n FROM ring_log" .n) - n0 )) $([[ $(d1q "SELECT last_seen_at AS t FROM agents WHERE id = 'grokbot'" .t) == "$s0" ]] && echo same || echo moved)"
+  for i in 1 2 3 4; do call POST /v1/send "$KC" "{\"to\":[\"muse\"],\"subject\":\"s19 page $i\",\"body\":\"x\"}"; done
   own "messages?limit=2"; p1=$(j '[.messages[].id] | join(",")'); cur=$(j .next_cursor); call POST /v1/send "$KC" '{"to":["muse"],"subject":"s19 new","body":"x"}'
   own "messages?limit=2&cursor=$(jq -rn --arg c "$cur" '$c | @uri')"; p2=$(j '[.messages[].id] | join(",")')
   row "19i pages: a cursor, no repeat, and mail arriving between pages does not shift them" "2 2 no-overlap" \
     "$(tr ',' '\n' <<<"$p1" | wc -l | tr -d ' ') $(tr ',' '\n' <<<"$p2" | wc -l | tr -d ' ') $(comm -12 <(tr ',' '\n' <<<"$p1" | sort) <(tr ',' '\n' <<<"$p2" | sort) | grep -q . && echo overlap || echo no-overlap)"
+  call POST /v1/send "$KC" '{"to":["grokbot"],"subject":"s19 again","body":"x"}'; sleep 1; call GET '/v1/inbox?unread=1' "$KG" "" # a second ring_log row
   own "messages?agent=muse&limit=100"; a=$(j '(.messages | length) as $n | $n > 0 and ([.messages[] | select((.from == "muse") or (.to | index("muse")))] | length) == $n'); own "rings?agent=grokbot&limit=1"; b="$(j '.entries[0].agent') $(j '.next_cursor != null')"
   own 'messages?cursor=nonsense'; c=$STATUS; own 'messages?limit=0'; c="$c $STATUS"; own 'messages?agent=BAD*'; c="$c $STATUS"; own 'rings?cursor=x'; c="$c $STATUS"
   row "19j filter by agent; the ring log pages too; a bad cursor, limit or agent is 400" "true grokbot true 400 400 400 400" "$a $b $c"
@@ -1435,7 +1442,7 @@ if [[ $MODE == --local && -n ${BOTLINE_DEV_LOG:-} ]]; then
   R20_NOTE="alert rows: ran"
   deadn() { grep -c '"event":"dead_letter"' "$BOTLINE_DEV_LOG"; }
   (cd "$ROOT" && node scripts/doorbell-set.mjs muse generic_webhook "$BASE/v1/_echo" "wrong-$RANDOM" "$MODE" >/dev/null 2>&1)
-  d1 "UPDATE rings SET fail_count = 3, lease_until = NULL, in_flight_since = NULL WHERE workspace_id = 'default' AND agent = 'muse'"
+  d1 "INSERT OR REPLACE INTO rings (workspace_id, agent, fail_count, last_status, last_at) VALUES ('default', 'muse', 3, 'failed', '$PAST')"
   n0=$(deadn); call POST /v1/send "$KC" '{"to":["muse"],"subject":"s20 4th","body":"x"}'; sleep 2; a=$(( $(deadn) - n0 ))
   d1 "UPDATE rings SET lease_until = NULL WHERE workspace_id = 'default' AND agent = 'muse'"
   call POST /v1/send "$KC" '{"to":["muse"],"subject":"s20 5th","body":"x"}'; sleep 2; b=$(( $(deadn) - n0 ))

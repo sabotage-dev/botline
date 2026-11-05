@@ -37,7 +37,7 @@ export const BUSY_DELAYS_S = [90, 180, 360];
 const BUSY_WINDOW_MS = 10 * 60_000;
 export const RERING_PER_HOUR = 6;
 export const RECONCILE_CRON = "* * * * *";
-/** Accepted rings allowed past the first for one anchor message: 3 recoveries, a lease apart. */
+/** Accepted rings allowed past the first since the newest unread mail: 3 recoveries, a lease apart. */
 export const RECOVER_MAX = 3;
 const RECOVER_PER_TICK = 5;
 const RERING_GRACE_MS = 120_000; // a re-ring token this far past due is the Queue's loss, not the Queue's job
@@ -130,16 +130,17 @@ export async function rering(env: Env, job: RingJob, via?: string): Promise<"sta
   return "rang";
 }
 
-export type Pending = AgentRow & { gen: string | null; fresh: string | null; n: number; last_ok: string | null };
+export type Pending = AgentRow & { gen: string | null; fresh: number; n: number; last_ok: string | null };
 
 /** Doorbelled agents with mail to recover, oldest mail first. Agents are few and only unread receipts are read (the
- *  receipts_unread index, per agent), so an idle minute costs one small query. The anchor is the oldest unread mail no
- *  doorbell has accepted, else the oldest unread mail; `oks` counts the accepted rings since it, from the log the rings
- *  already write. No lease is live, the agent is not dead-lettered, and any re-ring token is past the Queue's turn. */
+ *  receipts_unread index, per agent), so an idle minute costs one small query. `n` counts the accepted rings since the
+ *  newest unread mail, from the log the rings already write: each new message gets its own ring and recoveries, whatever
+ *  older mail is stuck behind it. No lease is live, the agent is not dead-lettered, and any re-ring token is past the
+ *  Queue's turn. `fresh` is set when some of the mail has never been accepted by a doorbell. */
 const RECONCILE_SQL = `
   WITH pending AS (
     SELECT a.workspace_id AS ws, a.id AS agent_id, g.rering_gen AS gen, MIN(m.created_at) AS oldest,
-      MIN(CASE WHEN r.delivered_at IS NULL THEN m.created_at END) AS fresh
+      MAX(m.created_at) AS newest, MAX(r.delivered_at IS NULL) AS fresh
     FROM agents a
     JOIN receipts r ON r.workspace_id = a.workspace_id AND r.agent = a.id AND r.read_at IS NULL
     JOIN messages m ON m.id = r.message_id
@@ -154,7 +155,7 @@ const RECONCILE_SQL = `
     GROUP BY a.workspace_id, a.id
   ), oks AS (
     SELECT p.*, COUNT(l.id) AS n, MAX(l.at) AS last_ok FROM pending p
-    LEFT JOIN ring_log l ON l.workspace_id = p.ws AND l.agent = p.agent_id AND l.status = 'ok' AND l.at >= COALESCE(p.fresh, p.oldest)
+    LEFT JOIN ring_log l ON l.workspace_id = p.ws AND l.agent = p.agent_id AND l.status = 'ok' AND l.at >= p.newest
     GROUP BY p.ws, p.agent_id
   )
   SELECT ag.*, o.gen, o.fresh, o.n, o.last_ok FROM oks o JOIN agents ag ON ag.workspace_id = o.ws AND ag.id = o.agent_id

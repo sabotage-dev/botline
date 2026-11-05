@@ -28,7 +28,7 @@ export interface AgentRow {
   doorbell_secret: string | null; created_at: string;
   controllers?: string; // v0.4: JSON array of agent ids whose messages are tasks for this agent (missing before migrate)
   type?: string; // v0.5: the runtime it is, a label only (missing before migrate: read as 'custom')
-  last_seen_at?: string | null; // v0.6: the last keyed call of any kind, to within TOUCH_MS (missing before migrate)
+  last_seen_at?: string | null; // v0.6: the last keyed call of any kind (missing before migrate)
   via_prev?: boolean; // set by authenticate(): the caller used its previous key (inside the grace window)
 }
 
@@ -127,13 +127,12 @@ export async function authenticate(env: Env, req: Request): Promise<AgentRow | n
   return prev ? { ...prev, via_prev: true } : null;
 }
 
-const TOUCH_MS = 15_000;
 /** v0.6: this agent just made a keyed call (a peek, a `me`, an empty poll: nothing else records those). The doorbell's
- *  silence gate and the owner's "last seen" read it. At most one write per TOUCH_MS per agent, decided from the row we
- *  already hold, so most requests make no database call. Runs in ctx.waitUntil, off the request path. A database before
- *  migrate.mjs has no column: the row then has no such field, and this does nothing. Never throws. */
+ *  silence gate and the owner's "last seen" read it. Every call writes: the gate compares this with a ring's time, so a
+ *  throttle here would hide the first call after a ring and wake a live agent twice. Runs in ctx.waitUntil, off the request
+ *  path. A database before migrate.mjs has no column: the row then has no such field, and this does nothing. Never throws. */
 export async function touch(env: Env, a: AgentRow): Promise<void> {
-  if (a.last_seen_at === undefined || (a.last_seen_at && Date.now() - Date.parse(a.last_seen_at) < TOUCH_MS)) return;
+  if (a.last_seen_at === undefined) return;
   try {
     await env.DB.prepare("UPDATE agents SET last_seen_at = ? WHERE workspace_id = ? AND id = ?").bind(now(), a.workspace_id, a.id).run();
   } catch (e) {

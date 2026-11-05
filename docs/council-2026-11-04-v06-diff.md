@@ -1,0 +1,32 @@
+# Council round: v0.6 applied diff, round 1 (2026-11-04, 07:38–07:58Z)
+
+- **Root:** `git archive 1551836`, `_base/` at `c27a93b`, `DIFF.patch`, `BRIEF.md` (NONCE `BOTLINE-V06-DIFF-93813630C2`).
+- **Questions:** the reconciler as built, with one deliberate trade-off to judge; status and retention; owner surface and tooling.
+
+## Ratification (from the records)
+
+| Leg | Record | Model / effort | cwd = root | NONCE | Touched | Verdict |
+|---|---|---|---|---|---|---|
+| codex | rollout `…01a1aaa4-d1a8-7bc3-ab62-929682d8248e` `turn_context` | `gpt-6.1-sol` / `high`, read-only | yes | yes | n/a | NEEDS-WORK |
+| sonnet seat | Kiro out of credits this month: a Sonnet 5.5 subagent on the same root and brief | Agent tool `model: sonnet` | yes | yes | none | SHIP |
+| grok | `grok-20261105073809-f9son.json` | `grok-4.7` | yes | yes | `[]` | SHIP |
+
+No residue in the root.
+
+## Findings, each reproduced on the main loop
+
+| # | Finding | Filed by | Disposition |
+|---|---|---|---|
+| 1 | `deploy.sh` forwards four named vars, so a `RETENTION_DAYS=off` line in the deploy file is silently dropped | codex | **Adopted.** Every line is now passed on, and a secret in the file is refused. Production's only non-default vars today are the three the checklist names (read from the deployed version), so nothing was at risk yet. |
+| 2 | The 15 s `touch` throttle hides the first call after a ring, so a live agent can be woken twice | codex | **Adopted.** Reproduced by codex. I had called the window negligible; the throttle was unmeasured optimisation. Removed: every keyed call stamps. New row 16n2. |
+| 3 | Older stuck mail consumes new mail's recovery budget: the anchor falls back to it after the new mail's first accepted ring, and `n` jumps from 0 to 5 | codex (sonnet: noted, unverified) | **Adopted.** Reproduced in SQLite. The budget now runs from the newest unread mail, which also removes the fallback. Row 16m now covers the second ring onward. |
+
+Two SHIP verdicts sat over three real defects. The dissenting leg was right on all three, again.
+
+## The trade-off (Q1)
+
+A ring accepted mid-run and then swallowed leaves mail unread; the agent's last call came after the ring, so the silence gate never re-rings it. Codex and grok: keep the gate, because the alternative risks running a held task twice. Sonnet: replace it with "seen in the last N minutes", because the loss is silent and any keyed call defeats the gate. **Kept (2-1).** The mail stays unread and shows as outstanding on `/owner`, and the next send rings it.
+
+## Blocker call
+
+Findings 1–3 are fixed. They are reviewed in round 2, on `FOLD.diff` only.

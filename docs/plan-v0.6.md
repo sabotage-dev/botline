@@ -4,7 +4,7 @@ Source: GPT 6.1 sol's engineering roadmap, validated against this checkout and p
 (Pat, verbatim): "Read the feedback, validate it. Then come up with a plan (not design docs) to address it. Council the
 plan, then gooooo".
 
-**Council:** one plan round, every finding folded below (`docs/council-2026-11-04-v06-plan.md`).
+**Council:** one plan round and a diff round, every finding folded below (`docs/council-2026-11-04-v06-plan.md`, `docs/council-2026-11-04-v06-diff.md`).
 
 **State this is written against:** `c27a93b` on `main`, v0.5.0-pre; production Worker `bc2ec0fd`. Nothing below exists yet
 unless the validation table says so.
@@ -64,10 +64,10 @@ CI first because every other task is judged by it.
   - not dead-lettered, no live lease (the same fields `attempt()` claims on);
   - no re-ring pending: `rering_at` is NULL or more than 120 s past due;
   - unread, unexpired, `RINGABLE_SQL` mail (no age limit: D3).
-- **Bounded by what the log already says.** Anchor = oldest never-accepted unread mail, else oldest unread mail. Count the `ok` rows in `ring_log` for this agent at or after the anchor. Ring while that count is `<= RECOVER_MAX` (3), so at most 4 accepted rings per anchor: the original and 3 recoveries. No new column; add index `ring_log (workspace_id, agent, at)`.
+- **Bounded by what the log already says.** Count the `ok` rows in `ring_log` for this agent since the newest unread mail. Ring while that count is `<= RECOVER_MAX` (3), so each new message gets at most 4 accepted rings: its own and 3 recoveries, whatever older mail is stuck (diff round finding 3). No new column; add index `ring_log (workspace_id, agent, at)`.
 - **Silence gate (council finding 5).** Mail a doorbell already accepted is re-rung only if the agent has been silent since the last `ok` ring: `agents.last_seen_at` is older than that ring. A live agent that peeked and is working is never re-rung. Never-accepted mail does not need the gate: nothing has woken anyone for it.
 - **The lease is the cooldown.** A 2xx holds the lease 10 minutes, so recovery rings land at about 10, 20 and 30 minutes, then stop until newer mail arrives. Never-accepted mail rings on the next tick.
-- `agents.last_seen_at`: stamped from the authenticated row in `ctx.waitUntil` on any keyed REST or MCP call, at most every 15 s, so most requests make no database call. A database without the column skips it.
+- `agents.last_seen_at`: stamped in `ctx.waitUntil` on every keyed REST or MCP call. No throttle: the gate compares it with a ring's time, so a throttle would hide the first call after a ring (diff round finding 2). A database without the column skips it.
 - **A ring that has gone out keeps its lease (council finding 4).** `attempt()` releases on a throw only before the fetch. After the fetch the lease stays, so a failing `ok` batch cannot ring every tick, on any path.
 - Uses `attempt()` / `rering()`, so one lease, one ring path, one backoff. A token more than 120 s overdue goes through `rering()`, which consumes it. `adapter.allows()` runs in JS before the limit of 5 rings per tick, oldest mail first, in parallel, so a blocked agent neither logs nor starves another. Failures of one agent do not stop the others.
 - `ring_log.detail = 'reconcile'` on the rows it causes. Only unread mail rings; mail already claimed is never re-rung, so nothing resubmits an instruction.

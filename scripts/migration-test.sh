@@ -111,9 +111,15 @@ fi
 
 printf 'WEBHOOK_ALLOWED_HOSTS=\nWAITLIST_FROM=\nREPO_URL=\n' >"$W/deploy-empty.env"
 printf 'WEBHOOK_ALLOWED_HOSTS=relay.example.invalid\nWAITLIST_FROM=\nREPO_URL=\n' >"$W/deploy-ok.env"
+printf '# a comment\n\nWEBHOOK_ALLOWED_HOSTS=relay.example.invalid\nRETENTION_DAYS=off\nMCP_ALLOWED_ORIGINS=https://a.example.invalid:8443\n' >"$W/deploy-all.env"
+printf 'WEBHOOK_ALLOWED_HOSTS=relay.example.invalid\nOWNER_KEY=oops\n' >"$W/deploy-secret.env"
 a=$(BOTLINE_PERSIST_TO=$OLD BOTLINE_DEPLOY_ENV=$W/deploy-empty.env scripts/deploy.sh --dry-run --local 2>&1 >/dev/null); e1=$?
 b=$(BOTLINE_PERSIST_TO=$OLD BOTLINE_DEPLOY_ENV=$W/deploy-ok.env scripts/deploy.sh --dry-run --local 2>&1 >/dev/null); e2=$?
 c=$(BOTLINE_PERSIST_TO=$FRESH BOTLINE_DEPLOY_ENV=$W/deploy-empty.env scripts/deploy.sh --dry-run --local 2>&1 >/dev/null); e3=$?
+e=$(BOTLINE_PERSIST_TO=$OLD BOTLINE_DEPLOY_ENV=$W/deploy-all.env scripts/deploy.sh --dry-run --local 2>&1 >/dev/null)
+f=$(BOTLINE_PERSIST_TO=$OLD BOTLINE_DEPLOY_ENV=$W/deploy-secret.env scripts/deploy.sh --dry-run --local 2>&1 >/dev/null); e5=$?
+row "m10 every line of the deploy file is passed on, so none is silently dropped; a secret in it is refused" "WEBHOOK_ALLOWED_HOSTS RETENTION_DAYS MCP_ALLOWED_ORIGINS 1 secret" \
+  "$(sed -n 's/.*vars: //p' <<<"$e") $e5 $(grep -q 'OWNER_KEY is a secret' <<<"$f" && echo secret || echo no-secret)"
 sql "$FRESH" "ALTER TABLE messages DROP COLUMN reply_to" >/dev/null
 d=$(BOTLINE_PERSIST_TO=$FRESH BOTLINE_DEPLOY_ENV=$W/deploy-ok.env scripts/deploy.sh --dry-run --local 2>&1 >/dev/null); e4=$?
 row "m9 deploy.sh --dry-run: no allowed host for a generic_webhook: refused; listed: passes; no such doorbell: passes; schema behind: refused" "1 host 0 0 1 schema" \
