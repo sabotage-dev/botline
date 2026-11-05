@@ -105,6 +105,7 @@ check() {
     scripts/check.sh "http://127.0.0.1:$PORT" "$KC" "$KG" "$KM" | tee "$WORK/check.md"
   local rc=${PIPESTATUS[0]}
   grep -c '| PASS |' "$WORK/check.md"
+  grep '| FAIL |' "$WORK/check.md" # last, so step() shows them whatever the table's length
   return "$rc"
 }
 export BOTLINE_DEV_LOG=$WORK/dev.log
