@@ -44,6 +44,8 @@
 #      and it plants mail and rewrites ring state with SQL, so it runs only with --local (skipped otherwise; the summary says so).
 #      Section 18 (v0.6: retention) plants aged rows with SQL and fires the daily Cron, so it too runs only with --local and
 #      --test-scheduled. BOTLINE_NOFILES_BASE, started with --test-scheduled --var RETENTION_DAYS:off, adds the off row.
+#      Section 19 (v0.6: the owner's view) needs OWNER_KEY here equal to the Worker's (unset: skipped, and the summary says so).
+#      BOTLINE_NOFILES_BASE, without OWNER_KEY, adds the 404 row. Run it with --local: it adds a workspace with SQL.
 #      Cleanup failures are printed as `warning: cleanup: …` lines on stderr.
 # Requires curl, jq, python3. Prints a markdown table; exits 1 if any step fails. Never prints a key.
 set -uo pipefail
@@ -63,7 +65,7 @@ FIDS=(); QB=""; QF="" # FIDS: files this run uploaded (expired on exit); QB/QF: 
 SEEN0=""; WSN0=""; WSF0=""; OWS=""; RENAMED="" # section 13: saved capability state, the second workspace, renamed tables
 GR0=""; CTL0=""; DEL0=""; CID=""; OWS2="" # section 12/14: saved grants, controllers, delegation; throwaway agent and workspace
 TY0=""; SIG0=""; OWS3=""; NT=""; RCOL="" # section 15: saved types and watch URLs, third workspace, throwaway agent, renamed column
-LSCOL=""; TRG=""; RM="" # sections 16-17: a renamed agents.last_seen_at, a planted trigger, a renamed messages.reply_to
+OWS4=""; LSCOL=""; TRG=""; RM="" # section 19: its workspace; sections 16-17: a renamed agents.last_seen_at, a planted trigger, a renamed messages.reply_to
 cleanup() {
   local w=() m
   (cd "$ROOT" && node scripts/doorbell-set.mjs muse none - "$MODE" >/dev/null 2>&1) \
@@ -75,6 +77,11 @@ cleanup() {
       if [[ $(d1q "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = '${t}_chk'" .n) == 1 ]]; then
         d1 "DROP TABLE IF EXISTS $t" && d1 "ALTER TABLE ${t}_chk RENAME TO $t" || w+=("table ${t}_chk was not renamed back to $t")
       fi
+    done
+  fi
+  if [[ -n $OWS4 ]]; then
+    for t in "receipts WHERE workspace_id" "messages WHERE workspace_id" "agents WHERE workspace_id"; do
+      d1 "DELETE FROM $t = '$OWS4'" || w+=("fourth-workspace rows were not deleted: DELETE FROM $t = '$OWS4'")
     done
   fi
   if [[ -n $RM ]]; then d1 "ALTER TABLE messages RENAME COLUMN reply_to_chk TO reply_to" || w+=("messages.reply_to_chk was not renamed back to reply_to"); fi
@@ -1356,10 +1363,70 @@ else
   echo "note: $R18_NOTE" >&2
 fi
 
-# 19. Table
+# 19. The owner's view (v0.6, docs/plan-v0.6.md T5). OWNER_KEY is a separate secret; the rows check the boundary, then the content.
+R19_NOTE="owner rows: skipped (OWNER_KEY unset, or not --local)"
+if [[ $MODE == --local && -n ${OWNER_KEY:-} ]]; then
+  R19_NOTE="owner rows: ran"
+  KO=$OWNER_KEY; own() { call GET "/v1/owner/$1" "$KO" ""; }
+  OWS4="chk19-$(now_ms)"; OS="secret-subject-$(now_ms)"; OB="secret-body-$(now_ms)"
+  d1 "INSERT INTO agents (workspace_id, id, name, key_hash, created_at) VALUES ('$OWS4', 'otheragent', 'Other', 'hash-$OWS4', '$PAST')"
+  d1 "INSERT INTO messages (workspace_id, id, thread_id, from_agent, to_agents, subject, body, created_at) VALUES ('$OWS4', 'msg_$OWS4', 'thr_$OWS4', 'otheragent', '[\"otheragent\"]', 'other', 'other', '2999-01-01T00:00:00.000Z')"
+  d1 "INSERT INTO receipts (workspace_id, message_id, agent) VALUES ('$OWS4', 'msg_$OWS4', 'otheragent')"
+  a=""; for k in "" "$KC" "$KG" "$KM" "bl_AAAAAAAA_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" "wrong-key"; do call GET /v1/owner/overview "$k" ""; a="$a $STATUS"; done
+  b=""; for p in overview messages rings "messages/msg_x"; do call GET "/v1/owner/$p" "$KG" ""; b="$b $STATUS"; done
+  row "19a no key, each agent's key, a well-formed and a wrong key: 401; an agent key on every owner route: 401" "401 401 401 401 401 401 / 401 401 401 401" "${a# } / ${b# }"
+  call POST /v1/owner/overview "$KO" '{}'; a=$STATUS; call GET /owner "" ""
+  own overview; c=$STATUS
+  row "19b the owner key answers; only GET" "200 405" "$c $a"
+  call GET /owner "" ""
+  grep -i '^content-security-policy:' "$TMP/hdr" | tr -d '\r' > "$TMP/csp"
+  row "19c /owner: the page needs no key and holds no data; CSP: a per-response script nonce, same-origin fetch, no frames; nothing parses HTML" \
+    "200 nonce connect-self no-frames no-agent-ids no-html-sinks" \
+    "$STATUS $(grep -q "script-src 'nonce-" "$TMP/csp" && echo nonce || echo no-nonce) $(grep -q "connect-src 'self'" "$TMP/csp" && echo connect-self || echo connect?) $(grep -q "frame-ancestors 'none'" "$TMP/csp" && echo no-frames || echo frames) $(grep -qE 'grokbot|"claude"|muse' <<<"$BODY" && echo agent-ids || echo no-agent-ids) $(grep -qE 'innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval\(' <<<"$BODY" && echo html-sinks || echo no-html-sinks)"
+
+  # An unread message, a failing doorbell, a poll-only agent, and a read-but-unanswered request.
+  call GET '/v1/inbox?unread=1' "$KG" ""; call GET '/v1/inbox?unread=1' "$KM" ""
+  (cd "$ROOT" && node scripts/doorbell-set.mjs grokbot generic_webhook "$BASE/v1/_echo" "wrong-$RANDOM" "$MODE" >/dev/null 2>&1)
+  call POST /v1/send "$KC" "{\"to\":[\"grokbot\"],\"subject\":\"$OS\",\"body\":\"$OB\",\"needs\":\"reply\"}"; M19=$(j .message.id); sleep 2
+  own overview; ag() { j ".agents[] | select(.id == \"$1\") | $2"; }
+  row "19d overview: a failing doorbell and a poll-only agent read differently; unread, oldest outstanding and the latest failure show" \
+    "doorbell backoff failed yes 1 set / polls ok" \
+    "$(ag grokbot .wakes) $(ag grokbot .doorbell.state) $(ag grokbot .last_failure.status) $([[ $(ag grokbot .last_failure.detail) == 'http 401' ]] && echo yes || echo no) $(ag grokbot .unread) $([[ $(ag grokbot .oldest_outstanding) =~ ^20 ]] && echo set || echo none) / $(ag muse .wakes) $(ag muse .doorbell.state)"
+  OV=$BODY
+  row "19e overview names no other workspace and returns no key hash, doorbell URL or secret" "clean" \
+    "$(grep -qE 'otheragent|key_hash|doorbell_url|doorbell_secret|_echo|enc:v1' <<<"$OV" && echo leaked || echo clean)"
+  own "messages?limit=50"; LS=$BODY
+  row "19f the message list: status per recipient, no subject or body, no other workspace" "$M19 waiting no-content no-other" \
+    "$(j '.messages[0].id') $(j '.messages[0].recipients[0].state') $(grep -qE "$OS|$OB" <<<"$LS" && echo content || echo no-content) $(grep -q otheragent <<<"$LS" && echo other || echo no-other)"
+  own "messages/$M19"; a="$STATUS $([[ $(j .message.subject) == "$OS" && $(j .message.body) == "$OB" ]] && echo content || echo none) $(grep -q untrusted-content <<<"$(j .message.body_wrapped)" && echo wrapped || echo bare)"
+  own "messages/msg_$OWS4"; b="$STATUS $(j .error)"
+  row "19g content on request, wrapped; a message in another workspace is 404" "200 content wrapped / 404 unknown_message" "$a / $b"
+  r0=$(d1q "SELECT read_at IS NULL AS u, delivered_at IS NULL AS d, acked_at IS NULL AS a FROM receipts WHERE message_id = '$M19'" '"\(.u) \(.d) \(.a)"'); g0=$(d1q "SELECT lease_until, fail_count, last_at FROM rings WHERE agent = 'grokbot'" '"\(.lease_until) \(.fail_count) \(.last_at)"'); n0=$(d1q "SELECT COUNT(*) AS n FROM ring_log" .n); s0=$(d1q "SELECT last_seen_at AS t FROM agents WHERE id = 'grokbot'" .t)
+  for p in overview "messages?limit=50" rings "messages/$M19"; do own "$p"; done; sleep 1
+  row "19h a full page load changes nothing: receipt, lease, ring log, last_seen_at" "same same 0 same" \
+    "$([[ $(d1q "SELECT read_at IS NULL AS u, delivered_at IS NULL AS d, acked_at IS NULL AS a FROM receipts WHERE message_id = '$M19'" '"\(.u) \(.d) \(.a)"') == "$r0" ]] && echo same || echo moved) $([[ $(d1q "SELECT lease_until, fail_count, last_at FROM rings WHERE agent = 'grokbot'" '"\(.lease_until) \(.fail_count) \(.last_at)"') == "$g0" ]] && echo same || echo moved) $(( $(d1q "SELECT COUNT(*) AS n FROM ring_log" .n) - n0 )) $([[ $(d1q "SELECT last_seen_at AS t FROM agents WHERE id = 'grokbot'" .t) == "$s0" ]] && echo same || echo moved)"
+  own "messages?limit=2"; p1=$(j '[.messages[].id] | join(",")'); cur=$(j .next_cursor); call POST /v1/send "$KC" '{"to":["muse"],"subject":"s19 new","body":"x"}'
+  own "messages?limit=2&cursor=$(jq -rn --arg c "$cur" '$c | @uri')"; p2=$(j '[.messages[].id] | join(",")')
+  row "19i pages: a cursor, no repeat, and mail arriving between pages does not shift them" "2 2 no-overlap" \
+    "$(tr ',' '\n' <<<"$p1" | wc -l | tr -d ' ') $(tr ',' '\n' <<<"$p2" | wc -l | tr -d ' ') $(comm -12 <(tr ',' '\n' <<<"$p1" | sort) <(tr ',' '\n' <<<"$p2" | sort) | grep -q . && echo overlap || echo no-overlap)"
+  own "messages?agent=muse&limit=100"; a=$(j '(.messages | length) as $n | $n > 0 and ([.messages[] | select((.from == "muse") or (.to | index("muse")))] | length) == $n'); own "rings?agent=grokbot&limit=1"; b="$(j '.entries[0].agent') $(j '.next_cursor != null')"
+  own 'messages?cursor=nonsense'; c=$STATUS; own 'messages?limit=0'; c="$c $STATUS"; own 'messages?agent=BAD*'; c="$c $STATUS"; own 'rings?cursor=x'; c="$c $STATUS"
+  row "19j filter by agent; the ring log pages too; a bad cursor, limit or agent is 400" "true grokbot true 400 400 400 400" "$a $b $c"
+  d1 "UPDATE receipts SET read_at = '$PAST' WHERE message_id = '$M19'"; d1 "UPDATE rings SET in_flight_since = NULL, lease_until = NULL, fail_count = 0, rering_gen = NULL, rering_at = NULL WHERE agent = 'grokbot'"
+  (cd "$ROOT" && node scripts/doorbell-set.mjs grokbot none - "$MODE" >/dev/null 2>&1)
+  call GET '/v1/inbox?unread=1' "$KM" ""
+  if [[ -n ${BOTLINE_NOFILES_BASE:-} ]]; then
+    a=$(curl -s -o /dev/null -w '%{http_code}' "${BOTLINE_NOFILES_BASE%/}/owner"); b=$(curl -s -o /dev/null -w '%{http_code}' -H "authorization: Bearer $KO" "${BOTLINE_NOFILES_BASE%/}/v1/owner/overview")
+    row "19k a deployment without OWNER_KEY: both 404, the key is no use" "404 404" "$a $b"
+  fi
+else
+  echo "note: $R19_NOTE" >&2
+fi
+
+# 20. Table
 echo "| step | expected | actual | result |"
 echo "|---|---|---|---|"
 printf '%s\n' "${ROWS[@]}"
 echo
-echo "steps: ${#ROWS[@]}  failed: $FAILS  base: $BASE  $TS_NOTE  $NF_NOTE  $SW_NOTE  $UM_NOTE  $GT_NOTE  ${D14_NOTE:-}  ${UM15_NOTE:-}  $R16_NOTE  $R18_NOTE  at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "steps: ${#ROWS[@]}  failed: $FAILS  base: $BASE  $TS_NOTE  $NF_NOTE  $SW_NOTE  $UM_NOTE  $GT_NOTE  ${D14_NOTE:-}  ${UM15_NOTE:-}  $R16_NOTE  $R18_NOTE  $R19_NOTE  at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 [[ $FAILS -eq 0 ]]

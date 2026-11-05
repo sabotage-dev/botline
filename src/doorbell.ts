@@ -129,7 +129,7 @@ export async function rering(env: Env, job: RingJob, via?: string): Promise<"sta
   return "rang";
 }
 
-type Pending = AgentRow & { gen: string | null; fresh: string | null; last_ok: string | null };
+export type Pending = AgentRow & { gen: string | null; fresh: string | null; n: number; last_ok: string | null };
 
 /** Doorbelled agents with mail to recover, oldest mail first. Agents are few and only unread receipts are read (the
  *  receipts_unread index, per agent), so an idle minute costs one small query. The anchor is the oldest unread mail no
@@ -156,8 +156,19 @@ const RECONCILE_SQL = `
     LEFT JOIN ring_log l ON l.workspace_id = p.ws AND l.agent = p.agent_id AND l.status = 'ok' AND l.at >= COALESCE(p.fresh, p.oldest)
     GROUP BY p.ws, p.agent_id
   )
-  SELECT ag.*, o.gen, o.fresh, o.last_ok FROM oks o JOIN agents ag ON ag.workspace_id = o.ws AND ag.id = o.agent_id
-  WHERE o.n <= ?4 ORDER BY o.oldest`;
+  SELECT ag.*, o.gen, o.fresh, o.n, o.last_ok FROM oks o JOIN agents ag ON ag.workspace_id = o.ws AND ag.id = o.agent_id
+  ORDER BY o.oldest`;
+
+/** Before migrate.mjs nothing can be recovered (and the owner's view shows nothing stuck). */
+export async function pendingRings(env: Env): Promise<Pending[]> {
+  const t = Date.now();
+  try {
+    return (await env.DB.prepare(RECONCILE_SQL).bind(iso(t), DEAD_AT, iso(t - RERING_GRACE_MS)).all<Pending>()).results;
+  } catch (e) {
+    if (/no such (table|column)/.test(String(e))) return [];
+    throw e;
+  }
+}
 
 /** Mail a doorbell already accepted rings again only if the agent has been silent since that ring: a live agent may hold a
  *  peeked task, and a second run would repeat it. Mail nobody accepted has woken nobody, so the gate does not apply.
@@ -167,17 +178,9 @@ const silent = (p: Pending) => !!p.fresh || (p.last_seen_at !== undefined && (!p
 /** The every-minute backstop (see the header). `oks` bounds accepted rings; failures have their own bound (backoff, then
  *  dead-letter). One agent's failure does not stop the others. A database before migrate.mjs recovers nothing. */
 export async function reconcile(env: Env): Promise<{ rung: number; failed: number }> {
-  const t = Date.now();
-  let rows: Pending[];
-  try {
-    rows = (await env.DB.prepare(RECONCILE_SQL).bind(iso(t), DEAD_AT, iso(t - RERING_GRACE_MS), RECOVER_MAX).all<Pending>()).results;
-  } catch (e) {
-    if (/no such (table|column)/.test(String(e))) return { rung: 0, failed: 0 };
-    throw e;
-  }
-  const due = rows.filter((p) => {
+  const due = (await pendingRings(env)).filter((p) => {
     const adapter = ADAPTERS[p.doorbell_kind];
-    if (!adapter || !silent(p)) return false;
+    if (!adapter || p.n > RECOVER_MAX || !silent(p)) return false;
     try { return adapter.allows(new URL(p.doorbell_url!), env); } catch { return false; } // fixing it rings on the next tick
   }).slice(0, RECOVER_PER_TICK);
   const done = await Promise.allSettled(due.map((p) => p.gen

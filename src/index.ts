@@ -4,6 +4,7 @@ import { markSeen } from "./capabilities";
 import { reconcile, RECONCILE_CRON, rering, type RingJob } from "./doorbell";
 import { handleMcp, rpcError } from "./mcp";
 import { docsHtml, openapi } from "./openapi";
+import { handleOwner } from "./owner";
 import { retain } from "./retention";
 import { signal } from "./signal";
 import * as files from "./files";
@@ -60,6 +61,10 @@ async function route(req: Request, env: Env, ctx: ExecutionContext): Promise<Res
   // Hosted-interest waitlist: public pages and POST /v1/waitlist, no key (src/waitlist.ts).
   const wl = await handleWaitlist(req, env, ctx, url, path);
   if (wl) return wl;
+
+  // The owner's view has its own secret and answers before any agent key is looked at (src/owner.ts).
+  const own = await handleOwner(req, env, url, path);
+  if (own) return own;
 
   if (path === "/mcp") {
     // We never push: no GET stream, no sessions to DELETE.

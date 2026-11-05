@@ -18,6 +18,7 @@ export interface Env {
   RERING?: Queue<RingJob>; // v0.4, optional: scheduled re-rings (busy doorbells, the end of a backoff); see src/doorbell.ts
   STATUS_ACK_OVERDUE_MIN?: string; STATUS_REPLY_OVERDUE_MIN?: string; // v0.6: when an open ack or reply reads overdue (default 60)
   RETENTION_DAYS?: string; // v0.6: days after expiry a message's content is scrubbed (default 7; "off" keeps it)
+  OWNER_KEY?: string; // v0.6, Workers Secret: opens /owner and /v1/owner/* (src/owner.ts). Unset or short: they answer 404
 }
 
 export interface AgentRow {
@@ -30,7 +31,7 @@ export interface AgentRow {
   via_prev?: boolean; // set by authenticate(): the caller used its previous key (inside the grace window)
 }
 
-interface MessageRow {
+export interface MessageRow {
   workspace_id: string; id: string; thread_id: string; hop_count: number; from_agent: string; to_agents: string;
   subject: string; body: string; needs: string; idempotency_key: string | null; created_at: string;
   expires_at: string | null; meta: string | null; reply_to?: string | null; // reply_to: missing before migrate
@@ -204,7 +205,7 @@ async function withAttachments(env: Env, ws: string, list: Message[]): Promise<M
 }
 
 /** Untrusted-content wrapper; a body cannot close (or open) the wrapper tag. */
-const wrap = (m: Message) => ({
+export const wrap = <T extends { from: string; id: string; body: string }>(m: T) => ({
   ...m,
   body_wrapped: `<untrusted-content from="${m.from}" id="${m.id}">${m.body.replace(/<(\/?untrusted-content)/gi, "&lt;$1")}</untrusted-content>`,
 });
