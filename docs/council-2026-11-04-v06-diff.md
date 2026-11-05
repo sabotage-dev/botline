@@ -46,6 +46,16 @@ Root: `git archive 950256b`, `FOLD.diff` from `29283cf`, NONCE `BOTLINE-V06-FOLD
 
 Non-blocking, none owed: the stand-in `npx` in m12 matches only `npx wrangler deploy` and passes other calls through; m12 joins arguments with commas, which is exact for its fixtures; the generated shim embeds paths in shell source, so a `TMPDIR` holding a quote or `$` would break it.
 
+## Round 4 (2026-11-05, 09:16–09:22Z): one fix to the test runner
+
+The final run failed at startup: `database is locked: SQLITE_BUSY`, because two `workerd` processes opened one local database at the same instant. A race in `scripts/ci.sh`, not in the Worker. The Workers now start one at a time (`5913836`). Measured with two Workers on a fresh database: started together, 1 of 20 starts hit it; one at a time, 0 of 20. At that rate 0 of 20 could be luck about a third of the time, so the evidence is the removed cause, not the count.
+
+Root: `git archive 5913836`, `FOLD.diff` from `950256b`, NONCE `BOTLINE-V06-FOLD4-B22B585801`. Ratified from the records: codex `gpt-6.1-sol` / `high` read-only (`…01a1aafe-bfe1-72b3-9d9c-ae3e27c8051c`), `grok-20261105091623-j1vg0.json` `grok-4.7` with `touched: []`, the Sonnet 5.5 subagent. No residue.
+
+**Verdict: APPROVE, unanimous, at `5913836`.**
+
+Non-blocking, none owed: the failure tail omits `ts.log`; `up()` waits out its limit even if the Worker has already died.
+
 ## Mutation passes (scratch copies, a fresh Worker and database per mutation)
 
 - **39 on `1551836`:** every mutation caught on the row aimed at. The runner first reported M15 (a reply to someone else counts) as surviving; row 17f in fact fails under it. That row prints multi-line JSON, which hid `FAIL` from the runner's regex. Reproduced by hand: `steps: 11 failed: 1`.
