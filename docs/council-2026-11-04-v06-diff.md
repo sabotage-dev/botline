@@ -46,6 +46,13 @@ Root: `git archive 950256b`, `FOLD.diff` from `29283cf`, NONCE `BOTLINE-V06-FOLD
 
 Non-blocking, none owed: the stand-in `npx` in m12 matches only `npx wrangler deploy` and passes other calls through; m12 joins arguments with commas, which is exact for its fixtures; the generated shim embeds paths in shell source, so a `TMPDIR` holding a quote or `$` would break it.
 
+## Mutation passes (scratch copies, a fresh Worker and database per mutation)
+
+- **39 on `1551836`:** every mutation caught on the row aimed at. The runner first reported M15 (a reply to someone else counts) as surviving; row 17f in fact fails under it. That row prints multi-line JSON, which hid `FAIL` from the runner's regex. Reproduced by hand: `steps: 11 failed: 1`.
+- **13 on `950256b`, what the folds changed:** all caught on the row aimed at, including the budget anchored on the oldest mail again (16m), `touch` throttled again (16n2), `deploy.sh` dropping the vars or their values (m12), a malformed line printed again (m11) and `--check` ignoring indexes (m1).
+
+Row `m6` does not run in a scratch copy, which has no release tag. It ran in the full suite.
+
 ## Blocker call
 
 Nothing is owed. Findings 1–5 are fixed and reviewed. Deploy stays with the owner.
