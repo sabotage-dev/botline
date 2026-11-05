@@ -38,6 +38,14 @@ Root: `git archive 29283cf`, `FOLD.diff` from `1551836`, NONCE `BOTLINE-V06-FOLD
 
 Noted, not owed: two unconditional `touch` writes can land out of order, and the gate reads a ring's completion time, so an agent that peeks while a slow fetch is open can look silent. Each needs a peek-and-hold agent plus a race inside one ring; neither has been seen, and neither was raised as a defect of the delta.
 
+## Round 3 (2026-11-05, 08:16–08:22Z): the last fold only
+
+Root: `git archive 950256b`, `FOLD.diff` from `29283cf`, NONCE `BOTLINE-V06-FOLD3-A5587C9273`. Ratified from the records: codex `gpt-6.1-sol` / `high` read-only (`…01a1aac7-aaf2-7f31-b5dd-0e16423f12c3`), `grok-20261105081614-2nvdw.json` `grok-4.7` with `touched: []`, the Sonnet 5.5 subagent. No residue. Findings 4 and 5 CLOSED by all three; no new serious finding.
+
+**Verdict: APPROVE, unanimous, at `950256b`.**
+
+Non-blocking, none owed: the stand-in `npx` in m12 matches only `npx wrangler deploy` and passes other calls through; m12 joins arguments with commas, which is exact for its fixtures; the generated shim embeds paths in shell source, so a `TMPDIR` holding a quote or `$` would break it.
+
 ## Blocker call
 
-Findings 1–5 are fixed. Findings 4 and 5 are reviewed in round 3, on their delta only.
+Nothing is owed. Findings 1–5 are fixed and reviewed. Deploy stays with the owner.
