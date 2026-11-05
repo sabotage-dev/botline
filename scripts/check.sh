@@ -194,7 +194,10 @@ call() {
   local m=$1 p=$2 k=$3 d=$4; shift 4
   local args=(-sS -D "$TMP/hdr" -o "$TMP/body" -w '%{http_code}' -X "$m" "$BASE$p")
   [[ -n $k ]] && args+=(-H "authorization: Bearer $k")
-  [[ -n $d ]] && args+=(-H 'content-type: application/json' --data "$d")
+  if (( ${#d} > 100000 )); then # a file: Linux caps one argument at 128 KB, and a refused curl would leave the last BODY
+    printf '%s' "$d" >"$TMP/req"; args+=(-H 'content-type: application/json' --data-binary "@$TMP/req")
+  elif [[ -n $d ]]; then args+=(-H 'content-type: application/json' --data "$d"); fi
+  : >"$TMP/body"
   STATUS=$(curl "${args[@]}" "$@"); BODY=$(cat "$TMP/body")
 }
 # mcp KEY JSON [extra headers...]
