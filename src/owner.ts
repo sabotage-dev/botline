@@ -35,39 +35,65 @@ function status(env: Env, m: Row, r: Rx, posts: Awaited<ReturnType<typeof thread
   };
 }
 
+/** A reply request this recipient has answered, in SQL, exactly as src/status.ts replyFacts reads the thread: a post from
+ *  the recipient, addressed to the sender, in the same thread, that either names it in reply_to (at any time) or is later
+ *  and names nothing. No expiry filter on the post: threadPosts loads expired posts too. Before the v0.6 migrate there is
+ *  no reply_to and every post is a thread post. */
+const ANSWERED = (replyTo: boolean) => `EXISTS (SELECT 1 FROM messages p WHERE p.workspace_id = m.workspace_id AND p.thread_id = m.thread_id
+  AND p.id <> m.id AND p.from_agent = r.agent
+  AND m.from_agent IN (SELECT value FROM json_each(CASE WHEN json_valid(p.to_agents) THEN p.to_agents ELSE '[]' END))
+  AND (${replyTo ? "p.reply_to = m.id OR ((p.reply_to IS NULL OR p.reply_to = '') AND p.created_at > m.created_at)" : "p.created_at > m.created_at"}))`;
+
+export interface Summary { unread: number; overdue: number; oldest_outstanding: string | null }
+
+/** Per agent, over every unexpired receipt (v0.6.1 T2: no page, no cap): unread; open work, meaning not acknowledged,
+ *  replied or received, where a later post closes a reply request only (as overdueSince says); how much of it is overdue
+ *  (ack and reply, from the read or else the send, src/status.ts); and the oldest. A drift test (test/owner.test.ts) holds
+ *  this to status.ts. Exported for that test. */
+export async function summaries(env: Env, t: number): Promise<Map<string, Summary>> {
+  const after = overdueAfter(env), iso = (ms: number) => new Date(ms).toISOString();
+  const q = (replyTo: boolean) => env.DB.prepare(
+    `WITH rx AS (
+       SELECT r.agent, r.read_at, m.needs, m.created_at,
+         CASE m.needs WHEN 'none' THEN r.read_at IS NULL AND r.acked_at IS NULL
+                      WHEN 'ack' THEN r.acked_at IS NULL
+                      ELSE NOT ${ANSWERED(replyTo)} END AS open
+       FROM receipts r JOIN messages m ON m.id = r.message_id
+       WHERE r.workspace_id = ?1 AND (m.expires_at IS NULL OR m.expires_at > ?2))
+     SELECT agent, SUM(read_at IS NULL) AS unread,
+       SUM(open AND ((needs = 'ack' AND COALESCE(read_at, created_at) <= ?3) OR (needs = 'reply' AND COALESCE(read_at, created_at) <= ?4))) AS overdue,
+       MIN(CASE WHEN open THEN created_at END) AS oldest_outstanding
+     FROM rx GROUP BY agent`,
+  ).bind(WS, iso(t), iso(t - after.ack_ms), iso(t - after.reply_ms)).all<Summary & { agent: string }>();
+  const r = await q(true).catch((e) => {
+    if (/no such column: (p\.)?reply_to/.test(String(e))) return q(false);
+    throw e;
+  });
+  return new Map(r.results.map((x) => [x.agent, { unread: x.unread, overdue: x.overdue, oldest_outstanding: x.oldest_outstanding }]));
+}
+
 async function overview(env: Env) {
   const t = Date.now(), at = new Date(t).toISOString();
-  const [agents, rings, open, failures, pending] = await Promise.all([
+  const [agents, rings, sums, failures, pending] = await Promise.all([
     env.DB.prepare("SELECT * FROM agents WHERE workspace_id = ? ORDER BY id").bind(WS).all<AgentRow>(), // SELECT *: last_seen_at needs migrate.mjs
     env.DB.prepare("SELECT * FROM rings WHERE workspace_id = ?").bind(WS).all<Parameters<typeof doorbellState>[1] & { agent: string; last_status: string | null; last_at: string | null }>(),
-    // What can still change: unread, an ack not given, a reply not seen. Newest 500; expired mail is gone from view.
-    env.DB.prepare(
-      `SELECT r.agent, r.message_id, r.delivered_at, r.read_at, r.acked_at, m.id, m.thread_id, m.from_agent, m.needs, m.created_at
-       FROM receipts r JOIN messages m ON m.id = r.message_id
-       WHERE r.workspace_id = ?1 AND (m.expires_at IS NULL OR m.expires_at > ?2)
-         AND (r.read_at IS NULL OR (m.needs = 'ack' AND r.acked_at IS NULL) OR m.needs = 'reply')
-       ORDER BY m.created_at DESC LIMIT 500`,
-    ).bind(WS, at).all<Rx & Row>(),
+    summaries(env, t), // expired mail is gone from view
     env.DB.prepare(
       `SELECT agent, status, http_status, detail, at FROM ring_log WHERE id IN (
          SELECT MAX(id) FROM ring_log WHERE workspace_id = ? AND status IN ('failed', 'timeout', 'error', 'blocked_destination') GROUP BY agent)`,
     ).bind(WS).all<{ agent: string; status: string; http_status: number | null; detail: string | null; at: string }>(),
     pendingRings(env),
   ]);
-  const posts = await threadPosts(env, WS, open.results);
   const stuck = new Set(pending.filter((p) => p.n > RECOVER_MAX && p.workspace_id === WS).map((p) => p.id));
-  const rows = open.results.map((r) => ({ r, s: status(env, r, r, posts, t) }));
   return {
     workspace_id: WS, server_time: at,
     agents: agents.results.map((a) => {
-      const mine = rows.filter((x) => x.r.agent === a.id), ring = rings.results.find((x) => x.agent === a.id) ?? null;
-      const waiting = mine.filter((x) => !["acknowledged", "replied", "received"].includes(x.s.state) && !x.s.later_post_at);
+      const ring = rings.results.find((x) => x.agent === a.id) ?? null, s = sums.get(a.id);
       return {
         id: a.id, name: a.name, type: a.type ?? "custom", wakes: a.doorbell_kind === "none" ? "polls" : "doorbell",
         doorbell: doorbellState(a.doorbell_kind, ring), last_ring: ring?.last_status ? { status: ring.last_status, at: ring.last_at } : null,
         last_failure: failures.results.find((x) => x.agent === a.id) ?? null, last_seen_at: a.last_seen_at ?? null,
-        unread: mine.filter((x) => !x.r.read_at).length, overdue: mine.filter((x) => x.s.overdue).length,
-        oldest_outstanding: waiting.map((x) => x.r.created_at).sort()[0] ?? null, stuck: stuck.has(a.id),
+        unread: s?.unread ?? 0, overdue: s?.overdue ?? 0, oldest_outstanding: s?.oldest_outstanding ?? null, stuck: stuck.has(a.id),
       };
     }),
   };
