@@ -39,7 +39,9 @@ function parseJsonOutput(stdout) {
 function exec(args) {
   // BOTLINE_PERSIST_TO points --local at another local state dir (same as `wrangler dev --persist-to`).
   const persist = args[0] === "--local" && process.env.BOTLINE_PERSIST_TO ? ["--persist-to", process.env.BOTLINE_PERSIST_TO] : [];
-  const r = spawnSync("npx", ["wrangler", "d1", "execute", DB, ...args, ...persist, "--yes", "--json"], { cwd: ROOT, encoding: "utf8" });
+  // BOTLINE_WRANGLER_CONFIG (relative to the repo): another wrangler config, the same one scripts/deploy.sh deploys with.
+  const config = process.env.BOTLINE_WRANGLER_CONFIG ? ["--config", process.env.BOTLINE_WRANGLER_CONFIG] : [];
+  const r = spawnSync("npx", ["wrangler", "d1", "execute", DB, ...args, ...config, ...persist, "--yes", "--json"], { cwd: ROOT, encoding: "utf8" });
   if (r.status !== 0) die(`wrangler d1 execute failed:\n${r.stderr || r.stdout}`);
   return parseJsonOutput(r.stdout);
 }

@@ -112,6 +112,46 @@ describe("the owner's summaries", () => {
     expect(got.alice).toEqual({ unread: 1, overdue: 0, oldest_outstanding: iso(-30) });
   });
 
+  it("closes each reply request exactly when status.ts does, one recipient per case", async () => {
+    // Each case: alice asks one recipient (r_<case>) for a reply 90 min ago, read at once; then the post below, if any.
+    // Open = overdue 1 and oldest_outstanding = the request; closed = overdue 0 and null.
+    const cases: [string, boolean, Partial<Msg> | null, string?][] = [
+      ["explicit_after", false, { reply_to: "self", at: -80 }],
+      ["explicit_before", false, { reply_to: "self", at: -95 }],             // reply_to: no time rule
+      ["explicit_expired", false, { reply_to: "self", at: -80, expired: true }],
+      ["later_plain", false, { at: -80 }],
+      ["later_empty_reply_to", false, { at: -80 }, "''"],                    // reply_to '' is no reply_to
+      ["earlier_plain", true, { at: -95 }],
+      ["later_names_other", true, { reply_to: "msg_other", at: -80 }],
+      ["to_third_party", true, { reply_to: "self", at: -80, to: ["carol"] }],
+      ["from_someone_else", true, { reply_to: "self", at: -80, from: "carol" }],
+      ["other_thread", true, { reply_to: "self", at: -80, thread: "thr_other" }],
+      ["to_json_string", true, { reply_to: "self", at: -80 }, `'"alice"'`],
+      ["to_json_object", true, { reply_to: "self", at: -80 }, `'{"x":"alice"}'`],
+      ["to_not_json", true, { reply_to: "self", at: -80 }, "'alice'"],
+      ["no_post", true, null],
+    ];
+    const m: Msg[] = [], r: Rc[] = [], fix: string[] = [];
+    for (const [name, , post, raw] of cases) {
+      const id = `msg_q_${name}`, who = `r_${name}`, thread = `thr_${name}`;
+      m.push({ id, from: "alice", to: [who], needs: "reply", at: -90, thread });
+      r.push({ id, agent: who, read: -90 });
+      if (!post) continue;
+      m.push({ id: `${id}_p`, from: post.from ?? who, to: post.to ?? ["alice"], at: post.at!, thread: post.thread ?? thread,
+        reply_to: post.reply_to === "self" ? id : post.reply_to ?? null, expired: post.expired });
+      if (raw && name === "later_empty_reply_to") fix.push(`UPDATE messages SET reply_to = ${raw} WHERE id = '${id}_p'`);
+      else if (raw) fix.push(`UPDATE messages SET to_agents = ${raw} WHERE id = '${id}_p'`);
+    }
+    await put(env.DB, m, r);
+    for (const f of fix) await env.DB.prepare(f).run();
+    const got = await summaries(env, Date.now()), want = await derived();
+    for (const [name, open] of cases) {
+      const who = `r_${name}`;
+      expect(got.get(who), name).toEqual({ unread: 0, overdue: open ? 1 : 0, oldest_outstanding: open ? iso(-90) : null });
+      expect(want[who], `${name} (status.ts)`).toEqual(got.get(who));
+    }
+  });
+
   it("past 500 rows: every agent's oldest open message counts (the old newest-500 page lost both)", async () => {
     const m: Msg[] = [], r: Rc[] = [];
     m.push({ id: "msg_b_old", from: "alice", to: ["carol"], needs: "ack", at: -900 });

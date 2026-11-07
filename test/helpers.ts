@@ -7,16 +7,18 @@ export type TestEnv = Env & { DB_V01: D1Database; TEST_SCHEMA: string[]; TEST_SC
 export const testEnv = () => workerEnv as unknown as TestEnv;
 
 /** A statement whose SQL matches `re` fails before it runs (`fail`), or first runs `before` (a race: another poll, a send,
- *  an ack landing between two of the caller's statements). Each hook fires once unless `times` says otherwise. */
-export interface Hook { re: RegExp; fail?: boolean; before?: () => unknown; times?: number }
+ *  an ack landing between two of the caller's statements). It lets the first `skip` matches through, then fires once
+ *  unless `times` says otherwise. */
+export interface Hook { re: RegExp; fail?: boolean; before?: () => unknown; times?: number; skip?: number }
 
 /** A D1Database whose statements trip `hooks` on first/all/run/raw and inside batch (each batched statement trips before
  *  the batch runs, so a failing one means the batch never ran). Pass as `{ ...env, DB: faultyDb(env.DB, hooks) }`. */
 export function faultyDb(db: D1Database, hooks: Hook[]): D1Database & { tripped: string[] } {
-  const left = hooks.map((h) => h.times ?? 1), tripped: string[] = [];
+  const left = hooks.map((h) => h.times ?? 1), skip = hooks.map((h) => h.skip ?? 0), tripped: string[] = [];
   const trip = async (sql: string) => {
     for (const [i, h] of hooks.entries()) {
       if (left[i] <= 0 || !h.re.test(sql)) continue;
+      if (skip[i] > 0) { skip[i]--; continue; }
       left[i]--;
       tripped.push(String(h.re));
       if (h.before) await h.before();

@@ -41,7 +41,7 @@ function status(env: Env, m: Row, r: Rx, posts: Awaited<ReturnType<typeof thread
  *  no reply_to and every post is a thread post. */
 const ANSWERED = (replyTo: boolean) => `EXISTS (SELECT 1 FROM messages p WHERE p.workspace_id = m.workspace_id AND p.thread_id = m.thread_id
   AND p.id <> m.id AND p.from_agent = r.agent
-  AND m.from_agent IN (SELECT value FROM json_each(CASE WHEN json_valid(p.to_agents) THEN p.to_agents ELSE '[]' END))
+  AND m.from_agent IN (SELECT value FROM json_each(CASE WHEN json_valid(p.to_agents) AND json_type(p.to_agents) = 'array' THEN p.to_agents ELSE '[]' END))
   AND (${replyTo ? "p.reply_to = m.id OR ((p.reply_to IS NULL OR p.reply_to = '') AND p.created_at > m.created_at)" : "p.created_at > m.created_at"}))`;
 
 export interface Summary { unread: number; overdue: number; oldest_outstanding: string | null }

@@ -13,10 +13,9 @@ beforeEach(async () => {
   bob = await agent(env, "bob");
 });
 
-const MSG_READ = /^SELECT \* FROM messages WHERE workspace_id = \? AND id IN/;
+const CANDIDATES = /^SELECT r\.\*, m\.\* FROM receipts r JOIN messages m/; // each receipt with its message, one statement
 const ATTACH_READ = /FROM message_files/;
 const CLAIM = /^\s*UPDATE receipts SET read_at/;
-const CANDIDATES = /^SELECT r\.\* FROM receipts r JOIN messages m/;
 
 /** n messages alice → bob, oldest first, 1 ms apart: ids m0001…, all unread. */
 async function seed(n: number, needs = "none") {
@@ -38,7 +37,7 @@ const poll = (e: Env, o: { unread?: boolean; peek?: boolean } = {}) => store.inb
 const markRead = (id: string) => env.DB.prepare("UPDATE receipts SET read_at = ? WHERE agent = 'bob' AND message_id = ?").bind(store.now(), id).run();
 
 describe("a failure before the claim leaves the mail unread", () => {
-  for (const [name, re] of [["the message read", MSG_READ], ["the attachment read", ATTACH_READ], ["the claim (before it runs)", CLAIM]] as const) {
+  for (const [name, re] of [["the candidate read", CANDIDATES], ["the attachment read", ATTACH_READ], ["the claim (before it runs)", CLAIM]] as const) {
     it(`unread poll, fault on ${name}`, async () => {
       const ids = await seed(3);
       await expect(poll({ ...env, DB: faultyDb(env.DB, [{ re, fail: true }]) })).rejects.toThrow("injected fault");
@@ -91,6 +90,25 @@ describe("between the read and the claim", () => {
     expect(box.count).toBe(100);
     expect(await unread()).toEqual([]);
   });
+
+  // The refill runs after the first round's claim: whatever fails in it, the poll returns what the first round won, and
+  // the refill's own candidates stay unread.
+  for (const [name, hooks] of [
+    ["the refill's candidate read fails", [{ re: CANDIDATES, skip: 1, fail: true }]],
+    ["the refill's attachment read fails", [{ re: ATTACH_READ, skip: 1, fail: true }]],
+    ["the refill's claim fails before it runs", [{ re: CLAIM, skip: 1, fail: true }]],
+    ["a refill message will not parse", []],
+  ] as const) {
+    it(`a lost race, then ${name}: the first round's mail is returned, the rest stays unread`, async () => {
+      const ids = await seed(101);
+      if (!hooks.length) await env.DB.prepare("UPDATE messages SET meta = '{not json' WHERE id = ?").bind(ids[100]).run();
+      const db = faultyDb(env.DB, [{ re: CLAIM, before: () => markRead(ids[0]) }, ...hooks]);
+      const box = await poll({ ...env, DB: db });
+      expect(box.messages.map((m) => m.id)).toEqual(ids.slice(1, 100));
+      expect(box.messages.every((m) => m.claimed)).toBe(true);
+      expect(await unread()).toEqual([ids[100]]);
+    });
+  }
 
   it("an ack in between drops the message from the claim", async () => {
     const ids = await seed(2);

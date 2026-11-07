@@ -15,7 +15,8 @@
 # no --var, so wrangler.jsonc's values apply. Every check still runs. It refuses if the private file exists, so a
 # deployment that has one can never drop its values by accident; without it, a missing file is refused.
 # The host check uses the allowlist the Worker will actually have: the file's WEBHOOK_ALLOWED_HOSTS line if it has one,
-# else wrangler.jsonc's. BOTLINE_WRANGLER_CONFIG names another config (relative to the repo); it is then passed to wrangler.
+# else wrangler.jsonc's. BOTLINE_WRANGLER_CONFIG names another config (relative to the repo); every check and the deploy
+# then use it (migrate.mjs through scripts/_d1.mjs).
 # --dry-run stops after the checks and names the vars. --local checks a local database.
 # This is the guarded path, not the only one: a hand-typed `npx wrangler deploy` still skips every check.
 set -euo pipefail

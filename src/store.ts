@@ -401,26 +401,24 @@ export async function inbox(env: Env, a: AgentRow, opts: { unread: boolean; sinc
     since = d.toISOString();
   }
   // Everything that can fail runs BEFORE anything is claimed (a failure is a 500 that leaves unread mail unread): the
-  // server block, the delegation switch, and (in build) the message rows, their attachments and every response object.
-  // The claim is the last statement, and after it only a filter and the `claimed` flag (v0.6.1 T1). What remains is the
-  // response itself: if it is lost, or the claim commits and its reply is lost, the mail is read but unseen (the delivery
-  // contract in the README's inbox row; botline never re-sends a claimed message).
+  // server block, the delegation switch, the candidates (each receipt with its message, in one statement), their
+  // attachments and every response object. The claim is the last statement; after it only a filter and the `claimed`
+  // flag (v0.6.1 T1). The one later read, the unread path's refill, cannot fail the poll. What remains is the response
+  // itself: if it is lost, or the claim commits and its reply is lost, the mail is read but unseen (README "Delivery";
+  // botline never re-sends a claimed message).
   const server = await serverBlock(env, a, opts.surface);
   const deleg = await delegationOn(env, ws);
   const mine = `FROM receipts r JOIN messages m ON m.id = r.message_id WHERE r.workspace_id = ?1 AND r.agent = ?2
     AND (m.expires_at IS NULL OR m.expires_at > ?3) AND (?4 IS NULL OR m.created_at > ?4)`;
-  type Rx = Record<string, unknown> & { message_id: string; read_at?: string | null };
-  const unreadOldest = (limit: number) => env.DB.prepare(`SELECT r.* ${mine} AND r.read_at IS NULL ORDER BY m.created_at, m.id LIMIT ?5`)
-    .bind(ws, a.id, t, since, limit).all<Rx>().then((r) => r.results);
-  /** The response for these receipts, oldest first, as unclaimed. The trust each receipt was stamped with (trust_at_send,
-   *  absent before migrate.mjs) comes from the candidate read, so nothing is read after the claim. */
-  const build = async (rcs: Rx[]) => {
-    if (!rcs.length) return [];
-    const byId = new Map(rcs.map((x) => [x.message_id, x as Rc]));
-    const rows = (await env.DB.prepare("SELECT * FROM messages WHERE workspace_id = ? AND id IN (SELECT value FROM json_each(?)) ORDER BY created_at, id")
-      .bind(ws, JSON.stringify(rcs.map((x) => x.message_id))).all<MessageRow>()).results;
-    return (await withAttachments(env, ws, rows.map(toMessage))).map((m) => view(m, trustFor(a, m.from, byId.get(m.id), deleg), false));
-  };
+  // r.* then m.*: the receipt (read_at; trust_at_send, absent before migrate.mjs) and its message in one row. The only
+  // shared column is workspace_id, equal in both.
+  type Row = MessageRow & { message_id: string; read_at: string | null; trust_at_send?: string | null };
+  const unreadOldest = (limit: number) => env.DB.prepare(`SELECT r.*, m.* ${mine} AND r.read_at IS NULL ORDER BY m.created_at, m.id LIMIT ?5`)
+    .bind(ws, a.id, t, since, limit).all<Row>().then((r) => r.results);
+  /** The response for these candidates, in their order, unclaimed: their attachments, then every response object. */
+  const build = async (rows: Row[]) => rows.length
+    ? (await withAttachments(env, ws, rows.map(toMessage))).map((m, i) => view(m, trustFor(a, m.from, rows[i], deleg), false))
+    : [];
   /** Claim: only these ids, only while still unread. Concurrent polls never both win one (claimed: true once per recipient);
    *  a candidate another poll or an ack took in between is simply not won. No statement for no ids. */
   const claim = async (ids: string[]) => new Set(ids.length ? (await env.DB.prepare(
@@ -439,24 +437,34 @@ export async function inbox(env: Env, a: AgentRow, opts: { unread: boolean; sinc
   await env.DB.prepare("UPDATE rings SET in_flight_since = NULL, lease_until = NULL WHERE workspace_id = ? AND agent = ? AND in_flight_since IS NOT NULL")
     .bind(ws, a.id).run();
   if (opts.unread) {
-    // The oldest 100 unread. A candidate lost to a concurrent poll or an ack between the read and the claim is dropped;
-    // then one more round for the shortfall, so a poll that loses a race still returns what is waiting.
-    let out: ReturnType<typeof view>[] = [];
-    for (let round = 0; round < 2 && out.length < 100; round++) {
-      const rcs = await unreadOldest(100 - out.length);
-      const built = await build(rcs);
-      const won = await claim(rcs.map((x) => x.message_id));
-      out = out.concat(built.filter((m) => won.has(m.id)).map((m) => ({ ...m, claimed: true })));
-      if (won.size === rcs.length) break;
+    // The oldest 100 unread.
+    const take = async (limit: number) => {
+      const rows = await unreadOldest(limit);
+      const built = await build(rows);
+      const won = await claim(rows.map((x) => x.message_id));
+      return { lost: won.size < rows.length, won: built.filter((m) => won.has(m.id)).map((m) => ({ ...m, claimed: true })) };
+    };
+    const first = await take(100);
+    if (!first.lost) return reply(first.won);
+    // A candidate lost to a concurrent poll or an ack between the read and the claim was dropped: one more round for the
+    // shortfall, so a poll that loses a race still returns what is waiting. The first round's mail is claimed by now, so
+    // a failure in this round must not fail the poll (that would strand it): the poll returns what it already won.
+    try {
+      const more = await take(100 - first.won.length);
+      const byAge = (x: { created_at: string; id: string }, y: { created_at: string; id: string }) =>
+        x.created_at < y.created_at ? -1 : x.created_at > y.created_at ? 1 : x.id < y.id ? -1 : x.id > y.id ? 1 : 0;
+      return reply([...first.won, ...more.won].sort(byAge));
+    } catch (e) {
+      console.error("inbox refill", String(e).slice(0, 200));
+      return reply(first.won);
     }
-    return reply(out.sort((x, y) => x.created_at.localeCompare(y.created_at) || x.id.localeCompare(y.id)));
   }
   // All mail (read or not): the most recent 100, returned oldest first. Unread ones are marked read (claimed now); a row
   // another poll claimed in between is still returned, with claimed: false.
-  const rcs = (await env.DB.prepare(`SELECT r.* ${mine} ORDER BY m.created_at DESC, m.id DESC LIMIT 100`)
-    .bind(ws, a.id, t, since).all<Rx>()).results;
-  const built = await build(rcs);
-  const won = await claim(rcs.filter((x) => x.read_at == null).map((x) => x.message_id));
+  const rows = (await env.DB.prepare(`SELECT r.*, m.* ${mine} ORDER BY m.created_at DESC, m.id DESC LIMIT 100`)
+    .bind(ws, a.id, t, since).all<Row>()).results.reverse();
+  const built = await build(rows);
+  const won = await claim(rows.filter((x) => x.read_at == null).map((x) => x.message_id));
   return reply(built.map((m) => (won.has(m.id) ? { ...m, claimed: true } : m)));
 }
 

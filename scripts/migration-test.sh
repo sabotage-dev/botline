@@ -142,21 +142,26 @@ row "m12 a real deploy hands wrangler every line, values intact, colons included
 sed 's/"WEBHOOK_ALLOWED_HOSTS": ""/"WEBHOOK_ALLOWED_HOSTS": "relay.example.invalid"/' wrangler.jsonc >"$W/listed.jsonc"
 printf 'RETENTION_DAYS=off\n' >"$W/deploy-nohost.env"
 dep() { rm -f "$W/deploy.args"; PATH=$W/bin:$PATH "$@" >"$W/dep.out" 2>&1; local e=$?; [[ -e $W/deploy.args ]] && echo "$e $(paste -sd, - <"$W/deploy.args")" || echo "$e none"; }
-a=$(BOTLINE_DEPLOY_ENV=$W/no-such.env dep scripts/deploy.sh --no-vars)
-b=$(BOTLINE_DEPLOY_ENV=$W/no-such.env BOTLINE_WRANGLER_CONFIG=$W/listed.jsonc dep scripts/deploy.sh --no-vars)
+n1=$(BOTLINE_DEPLOY_ENV=$W/no-such.env dep scripts/deploy.sh --no-vars)
+n2=$(BOTLINE_DEPLOY_ENV=$W/no-such.env BOTLINE_WRANGLER_CONFIG=$W/listed.jsonc dep scripts/deploy.sh --no-vars)
 row "m13 --no-vars, no file: checks wrangler.jsonc's allowlist (empty: refused; listing the host: deploys, no --var)" \
-  "1 none 0 --config,$W/listed.jsonc" "$a $b"
-a=$(BOTLINE_DEPLOY_ENV=$W/deploy-ok.env dep scripts/deploy.sh --no-vars); g=$(cat "$W/dep.out")
-b=$(BOTLINE_DEPLOY_ENV=$W/no-such.env dep scripts/deploy.sh)
+  "1 none 0 --config,$W/listed.jsonc" "$n1 $n2"
+n1=$(BOTLINE_DEPLOY_ENV=$W/deploy-ok.env dep scripts/deploy.sh --no-vars); ng=$(cat "$W/dep.out")
+n2=$(BOTLINE_DEPLOY_ENV=$W/no-such.env dep scripts/deploy.sh)
 row "m14 --no-vars with a deploy file refuses (it would drop the file's values); no flag and no file refuses" "1 none exists 1 none" \
-  "$a $(grep -q 'exists' <<<"$g" && echo exists || echo no-reason) $b"
-a=$(BOTLINE_DEPLOY_ENV=$W/deploy-nohost.env dep scripts/deploy.sh); g=$(cat "$W/dep.out")
-b=$(BOTLINE_DEPLOY_ENV=$W/deploy-nohost.env BOTLINE_WRANGLER_CONFIG=$W/listed.jsonc dep scripts/deploy.sh)
+  "$n1 $(grep -q 'exists' <<<"$ng" && echo exists || echo no-reason) $n2"
+n1=$(BOTLINE_DEPLOY_ENV=$W/deploy-nohost.env dep scripts/deploy.sh); ng=$(cat "$W/dep.out")
+n2=$(BOTLINE_DEPLOY_ENV=$W/deploy-nohost.env BOTLINE_WRANGLER_CONFIG=$W/listed.jsonc dep scripts/deploy.sh)
 row "m15 a file without WEBHOOK_ALLOWED_HOSTS: wrangler.jsonc's allowlist is checked (empty: refused; listed: deploys)" \
-  "1 none host 0 --config,$W/listed.jsonc,--var,RETENTION_DAYS:off" "$a $(grep -q 'relay.example.invalid' <<<"$g" && echo host || echo no-host) $b"
-a=$(BOTLINE_DEPLOY_ENV=$W/deploy-all.env dep npm run --silent deploy)
+  "1 none host 0 --config,$W/listed.jsonc,--var,RETENTION_DAYS:off" "$n1 $(grep -q 'relay.example.invalid' <<<"$ng" && echo host || echo no-host) $n2"
+n1=$(BOTLINE_DEPLOY_ENV=$W/deploy-all.env dep npm run --silent deploy)
 row "m16 npm run deploy is deploy.sh (the same arguments as m12)" \
-  "0 --var,WEBHOOK_ALLOWED_HOSTS:relay.example.invalid,--var,RETENTION_DAYS:off,--var,MCP_ALLOWED_ORIGINS:https://a.example.invalid:8443" "$a"
+  "0 --var,WEBHOOK_ALLOWED_HOSTS:relay.example.invalid,--var,RETENTION_DAYS:off,--var,MCP_ALLOWED_ORIGINS:https://a.example.invalid:8443" "$n1"
+# A config naming another database: migrate --check must read that one (scripts/_d1.mjs), not wrangler.jsonc's, which is migrated.
+sed 's/"database_id": "[^"]*"/"database_id": "00000000-0000-4000-8000-0000000000aa"/' "$W/listed.jsonc" >"$W/other-db.jsonc"
+n1=$(BOTLINE_DEPLOY_ENV=$W/no-such.env BOTLINE_WRANGLER_CONFIG=$W/other-db.jsonc dep scripts/deploy.sh --no-vars); ng=$(cat "$W/dep.out")
+row "m18 BOTLINE_WRANGLER_CONFIG naming another, empty database: the schema check reads that one and refuses" "1 none behind" \
+  "$n1 $(grep -q 'behind this code' <<<"$ng" && echo behind || echo other-reason)"
 sql "$FRESH" "ALTER TABLE messages DROP COLUMN reply_to" >/dev/null
 nv=$(BOTLINE_PERSIST_TO=$FRESH BOTLINE_DEPLOY_ENV=$W/no-such.env scripts/deploy.sh --no-vars --dry-run --local 2>&1 >/dev/null); e8=$?
 row "m17 --no-vars still refuses a database behind the code" "1 schema" "$e8 $(grep -q 'reply_to' <<<"$nv" && echo schema || echo no-schema)"
