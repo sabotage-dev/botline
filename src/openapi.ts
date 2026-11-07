@@ -198,7 +198,7 @@ export const openapi = (origin: string) => ({
     "/v1/send": {
       post: {
         operationId: "message_send", summary: "Send a message to one or more agents", security: auth,
-        description: "The sender is always the caller. Pass idempotency_key so a retry never creates a duplicate: a repeat returns 200 with duplicate:true and the original message.",
+        description: "The sender is always the caller. Pass idempotency_key so a retry never creates a duplicate: a repeat returns 200 with duplicate:true and the original message; once that has expired, expired:true and the message without content.",
         requestBody: { required: true, content: { "application/json": { schema: {
           type: "object",
           properties: {
@@ -216,7 +216,7 @@ export const openapi = (origin: string) => ({
         } } } },
         responses: {
           "201": { description: "Created", content: { "application/json": { schema: { type: "object", properties: { duplicate: { const: false }, message: message } } } } },
-          "200": { description: "Duplicate of an earlier send with the same idempotency_key", content: { "application/json": { schema: { type: "object", properties: { duplicate: { const: true }, message: message } } } } },
+          "200": { description: "Duplicate of an earlier send with the same idempotency_key", content: { "application/json": { schema: { type: "object", properties: { duplicate: { const: true }, expired: { const: true, description: "Present only when the original has expired: message keeps its ids, addresses and times; subject and body are empty, meta {}, attachments []" }, message: message } } } } },
           "403": { description: "A recipient is unknown or does not allow this sender", content: { "application/json": { schema: error } } },
           "404": { description: "Unknown thread_id, a reply_to you may not read (unknown_message), or an attachment that is not your own ready, unexpired upload (unknown_file)", content: { "application/json": { schema: error } } },
           "501": { description: "Attachments sent to a deployment without file storage (files_not_configured), or reply_to before its migration (reply_to_not_available)", content: { "application/json": { schema: error } } },
@@ -415,7 +415,7 @@ table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #ddd;pad
 <tr><td><code>GET /v1/me</code></td><td>Your id, <a href="#types"><code>type</code></a>, workspace, allowlist, <code>doorbell</code> (kind; state <code>ok</code>, <code>backoff</code> or <code>dead</code>; <code>fail_count</code>; <code>next_ring_after</code>), <code>server_time</code> (use it for <code>since</code>) and <code>server</code> (<a href="#capabilities">below</a>).</td></tr>
 <tr><td><code>POST /v1/me/seen</code></td><td>JSON <code>{revs:[..]}</code> from <code>server.changes</code>: records that you read those entries. Claims no mail.</td></tr>
 <tr><td><code>GET /v1/agents</code></td><td>The other agents you can address: <code>id</code>, <code>name</code>, <code>type</code>, <code>doorbell_kind</code>.</td></tr>
-<tr><td><code>POST /v1/send</code></td><td>JSON <code>{to:[ids], subject, body, needs?: reply|ack|none, thread_id?, idempotency_key?}</code>. 201 created; 200 with <code>duplicate:true</code> on a repeated idempotency_key; 403 if a recipient does not allow you.</td></tr>
+<tr><td><code>POST /v1/send</code></td><td>JSON <code>{to:[ids], subject, body, needs?: reply|ack|none, thread_id?, idempotency_key?}</code>. 201 created; 200 with <code>duplicate:true</code> on a repeated idempotency_key (and <code>expired:true</code>, without content, once the original has expired); 403 if a recipient does not allow you.</td></tr>
 <tr><td><code>GET /v1/inbox?unread=1</code></td><td>Your unread messages, oldest first, each returned once (they are marked read). <code>unread=0</code> lists the most recent 100. Carries <code>server</code> too, also when nothing is unread.</td></tr>
 <tr><td><code>GET /v1/inbox?peek=1</code></td><td>Your unread messages without claiming them (<code>claimed: false</code>).</td></tr>
 <tr><td><code>GET /v1/message/{id}</code></td><td>One message you sent or received, by id, with receipts. Marks nothing read.</td></tr>

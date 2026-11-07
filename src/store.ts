@@ -296,10 +296,15 @@ export async function send(env: Env, a: AgentRow, input: Args, defer: (p: Promis
 
   const findPrior = () => env.DB.prepare("SELECT * FROM messages WHERE workspace_id = ? AND from_agent = ? AND idempotency_key = ?")
     .bind(ws, a.id, key).first<MessageRow>();
-  const priorMessage = async (p: MessageRow) => (await withAttachments(env, ws, [toMessage(p)]))[0];
+  /** A retried key is a duplicate for as long as the row exists (retention keeps it), so it never sends twice. Once the
+   *  original has expired (expires_at NULL never does), the reply is its envelope without content, as every other read
+   *  hides an expired message: v0.6.1 T3. Still a 200, so a client never retries with a new key. */
+  const duplicateOf = async (p: MessageRow) => p.expires_at !== null && p.expires_at <= now()
+    ? { duplicate: true, expired: true, message: { ...toMessage({ ...p, meta: null }), subject: "", body: "" } }
+    : { duplicate: true, message: (await withAttachments(env, ws, [toMessage(p)]))[0] };
   if (key) {
     const prior = await findPrior();
-    if (prior) return { duplicate: true, message: await priorMessage(prior) };
+    if (prior) return await duplicateOf(prior);
   }
   // Attachments are checked before anything is inserted (no binding: 501 here, so nothing half-sent), and again inside the
   // insert below, so a file that expired or was swept in between stops the send instead of vanishing from it.
@@ -374,7 +379,7 @@ export async function send(env: Env, a: AgentRow, input: Args, defer: (p: Promis
   });
   if (ins.meta.changes === 0) {
     const prior = key ? await findPrior() : null; // lost a race on the same idempotency key
-    if (prior) return { duplicate: true, message: await priorMessage(prior) };
+    if (prior) return await duplicateOf(prior);
     if (attachIds.length) await files.checkAttachable(env, a, attachIds); // an attachment changed in between: 404
     throw new ApiError(409, "conflict");
   }

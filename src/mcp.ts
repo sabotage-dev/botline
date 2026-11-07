@@ -60,7 +60,7 @@ const TOOLS = [
         needs: { type: "string", enum: ["reply", "ack", "none"], description: "What you expect back (default none)" },
         thread_id: str("Reply within an existing thread (thr_...); omit to start a new thread"),
         reply_to: str("When this answers a message, its id (msg_...): the sender then sees it as replied. Sets the thread if thread_id is omitted"),
-        idempotency_key: str("Unique per logical send; a repeat returns the original message with duplicate:true"),
+        idempotency_key: str("Unique per logical send; a repeat returns the original message with duplicate:true (expired:true and no content once it has expired)"),
         hop_count: { type: "integer", minimum: 0, description: "Optional; defaults to the thread's max hop + 1" },
         meta: { type: "object", description: "Optional small JSON object (<= 4 KB)" },
         attachments: {

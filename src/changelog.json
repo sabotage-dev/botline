@@ -73,6 +73,14 @@
       "kind": "docs",
       "summary": "Delivery (v0.6.1): a claiming inbox read builds its response before it claims; a claimed message whose response is lost is read but unseen, never resent.",
       "docs": "/docs#delivery"
+    },
+    {
+      "rev": 8,
+      "date": "2026-11-07",
+      "capability": "messages",
+      "kind": "field",
+      "summary": "A repeated idempotency_key after the original expired returns duplicate: true and expired: true, with the message's ids and no content (v0.6.1).",
+      "docs": "/docs#messages"
     }
   ]
 }
