@@ -3,7 +3,8 @@
 Source: a Codex review of botline (7.5/10; three correctness gaps, four architecture points). Pat's ask: "Treat it
 skeptically. Verify, and where it provides good advice/feedback, put a plan together to address."
 
-**Council:** one plan round, every finding folded below (`docs/council-2026-11-07-v061-plan.md`).
+**Council:** one plan round, every finding folded below (`docs/council-2026-11-07-v061-plan.md`). Two diff rounds on the
+implementation, every above-nit finding folded (`docs/council-2026-11-07-v061-diff.md`).
 
 **State this is written against:** `3243c78` on `main`, `VERSION` 0.6.0-pre; production Worker `82e5af1d` (v0.6).
 
