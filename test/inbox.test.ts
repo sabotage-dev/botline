@@ -110,6 +110,16 @@ describe("between the read and the claim", () => {
     });
   }
 
+  it("a lost race that won nothing, then a failing refill: an error, and nothing this poll claimed", async () => {
+    const ids = await seed(101);
+    const db = faultyDb(env.DB, [
+      { re: CLAIM, before: async () => { for (const id of ids.slice(0, 100)) await markRead(id); } }, // another poll takes all 100
+      { re: CANDIDATES, skip: 1, fail: true },                                                         // the refill's read fails
+    ]);
+    await expect(poll({ ...env, DB: db })).rejects.toThrow("injected fault");
+    expect(await unread()).toEqual([ids[100]]);
+  });
+
   it("an ack in between drops the message from the claim", async () => {
     const ids = await seed(2);
     const db = faultyDb(env.DB, [{ re: CLAIM, before: () => store.ack(env, bob, { id: ids[0] }) }]);

@@ -160,8 +160,8 @@ row "m16 npm run deploy is deploy.sh (the same arguments as m12)" \
 # A config naming another database: migrate --check must read that one (scripts/_d1.mjs), not wrangler.jsonc's, which is migrated.
 sed 's/"database_id": "[^"]*"/"database_id": "00000000-0000-4000-8000-0000000000aa"/' "$W/listed.jsonc" >"$W/other-db.jsonc"
 n1=$(BOTLINE_DEPLOY_ENV=$W/no-such.env BOTLINE_WRANGLER_CONFIG=$W/other-db.jsonc dep scripts/deploy.sh --no-vars); ng=$(cat "$W/dep.out")
-row "m18 BOTLINE_WRANGLER_CONFIG naming another, empty database: the schema check reads that one and refuses" "1 none behind" \
-  "$n1 $(grep -q 'behind this code' <<<"$ng" && echo behind || echo other-reason)"
+row "m18 BOTLINE_WRANGLER_CONFIG naming another, empty database: the schema check reads that one and refuses" "1 none behind empty" \
+  "$n1 $(grep -q 'behind this code' <<<"$ng" && echo behind || echo other-reason) $(grep -q 'missing: table agents' <<<"$ng" && echo empty || echo not-that-db)"
 sql "$FRESH" "ALTER TABLE messages DROP COLUMN reply_to" >/dev/null
 nv=$(BOTLINE_PERSIST_TO=$FRESH BOTLINE_DEPLOY_ENV=$W/no-such.env scripts/deploy.sh --no-vars --dry-run --local 2>&1 >/dev/null); e8=$?
 row "m17 --no-vars still refuses a database behind the code" "1 schema" "$e8 $(grep -q 'reply_to' <<<"$nv" && echo schema || echo no-schema)"

@@ -447,14 +447,16 @@ export async function inbox(env: Env, a: AgentRow, opts: { unread: boolean; sinc
     const first = await take(100);
     if (!first.lost) return reply(first.won);
     // A candidate lost to a concurrent poll or an ack between the read and the claim was dropped: one more round for the
-    // shortfall, so a poll that loses a race still returns what is waiting. The first round's mail is claimed by now, so
-    // a failure in this round must not fail the poll (that would strand it): the poll returns what it already won.
+    // shortfall, so a poll that loses a race still returns what is waiting. Once the first round has claimed mail, a
+    // failure in this round must not fail the poll (that would strand it): the poll returns what it already won. If it
+    // won nothing, nothing is claimed, and the failure is a 500 like any other.
     try {
       const more = await take(100 - first.won.length);
       const byAge = (x: { created_at: string; id: string }, y: { created_at: string; id: string }) =>
         x.created_at < y.created_at ? -1 : x.created_at > y.created_at ? 1 : x.id < y.id ? -1 : x.id > y.id ? 1 : 0;
       return reply([...first.won, ...more.won].sort(byAge));
     } catch (e) {
+      if (!first.won.length) throw e;
       console.error("inbox refill", String(e).slice(0, 200));
       return reply(first.won);
     }
