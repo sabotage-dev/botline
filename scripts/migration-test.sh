@@ -8,7 +8,7 @@
 #  - doorbell-reencrypt.mjs, twice: one layer of encryption, and src/secrets.ts opens it;
 #  - the deploy window: the previous release's Worker (OLD_REF) and this one both serve the migrated database;
 #  - deploy.sh refuses a generic_webhook doorbell with no allowed host and a secret or malformed line in its file, and hands
-#    wrangler every other line, checked on the real path against a stand-in npx.
+#    wrangler every other line, checked on the real path against a stand-in npx; --no-vars and `npm run deploy` likewise.
 # Requires node 24 (it imports src/secrets.ts directly), curl, jq, python3, and the OLD_REF tag.
 set -uo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -138,7 +138,28 @@ PATH=$W/bin:$PATH BOTLINE_DEPLOY_ENV=$W/deploy-all.env scripts/deploy.sh >/dev/n
 row "m12 a real deploy hands wrangler every line, values intact, colons included" \
   "0 --var,WEBHOOK_ALLOWED_HOSTS:relay.example.invalid,--var,RETENTION_DAYS:off,--var,MCP_ALLOWED_ORIGINS:https://a.example.invalid:8443" \
   "$e7 $(paste -sd, - <"$W/deploy.args" 2>/dev/null)"
+# v0.6.1: --no-vars, the effective allowlist (the file's line, else wrangler.jsonc's), and `npm run deploy`, on the same stand-in.
+sed 's/"WEBHOOK_ALLOWED_HOSTS": ""/"WEBHOOK_ALLOWED_HOSTS": "relay.example.invalid"/' wrangler.jsonc >"$W/listed.jsonc"
+printf 'RETENTION_DAYS=off\n' >"$W/deploy-nohost.env"
+dep() { rm -f "$W/deploy.args"; PATH=$W/bin:$PATH "$@" >"$W/dep.out" 2>&1; local e=$?; [[ -e $W/deploy.args ]] && echo "$e $(paste -sd, - <"$W/deploy.args")" || echo "$e none"; }
+a=$(BOTLINE_DEPLOY_ENV=$W/no-such.env dep scripts/deploy.sh --no-vars)
+b=$(BOTLINE_DEPLOY_ENV=$W/no-such.env BOTLINE_WRANGLER_CONFIG=$W/listed.jsonc dep scripts/deploy.sh --no-vars)
+row "m13 --no-vars, no file: checks wrangler.jsonc's allowlist (empty: refused; listing the host: deploys, no --var)" \
+  "1 none 0 --config,$W/listed.jsonc" "$a $b"
+a=$(BOTLINE_DEPLOY_ENV=$W/deploy-ok.env dep scripts/deploy.sh --no-vars); g=$(cat "$W/dep.out")
+b=$(BOTLINE_DEPLOY_ENV=$W/no-such.env dep scripts/deploy.sh)
+row "m14 --no-vars with a deploy file refuses (it would drop the file's values); no flag and no file refuses" "1 none exists 1 none" \
+  "$a $(grep -q 'exists' <<<"$g" && echo exists || echo no-reason) $b"
+a=$(BOTLINE_DEPLOY_ENV=$W/deploy-nohost.env dep scripts/deploy.sh); g=$(cat "$W/dep.out")
+b=$(BOTLINE_DEPLOY_ENV=$W/deploy-nohost.env BOTLINE_WRANGLER_CONFIG=$W/listed.jsonc dep scripts/deploy.sh)
+row "m15 a file without WEBHOOK_ALLOWED_HOSTS: wrangler.jsonc's allowlist is checked (empty: refused; listed: deploys)" \
+  "1 none host 0 --config,$W/listed.jsonc,--var,RETENTION_DAYS:off" "$a $(grep -q 'relay.example.invalid' <<<"$g" && echo host || echo no-host) $b"
+a=$(BOTLINE_DEPLOY_ENV=$W/deploy-all.env dep npm run --silent deploy)
+row "m16 npm run deploy is deploy.sh (the same arguments as m12)" \
+  "0 --var,WEBHOOK_ALLOWED_HOSTS:relay.example.invalid,--var,RETENTION_DAYS:off,--var,MCP_ALLOWED_ORIGINS:https://a.example.invalid:8443" "$a"
 sql "$FRESH" "ALTER TABLE messages DROP COLUMN reply_to" >/dev/null
+nv=$(BOTLINE_PERSIST_TO=$FRESH BOTLINE_DEPLOY_ENV=$W/no-such.env scripts/deploy.sh --no-vars --dry-run --local 2>&1 >/dev/null); e8=$?
+row "m17 --no-vars still refuses a database behind the code" "1 schema" "$e8 $(grep -q 'reply_to' <<<"$nv" && echo schema || echo no-schema)"
 d=$(BOTLINE_PERSIST_TO=$FRESH BOTLINE_DEPLOY_ENV=$W/deploy-ok.env scripts/deploy.sh --dry-run --local 2>&1 >/dev/null); e4=$?
 row "m9 deploy.sh --dry-run: no allowed host for a generic_webhook: refused; listed: passes; no such doorbell: passes; schema behind: refused" "1 host 0 0 1 schema" \
   "$e1 $(grep -q 'relay.example.invalid' <<<"$a" && echo host || echo no-host) $e2 $e3 $e4 $(grep -q 'reply_to' <<<"$d" && echo schema || echo no-schema)"

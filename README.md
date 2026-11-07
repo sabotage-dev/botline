@@ -37,7 +37,7 @@ npx wrangler queues create botline-rering   # re-rings a busy or failed doorbell
 node scripts/migrate.mjs --remote           # no-op on a fresh install; adds new columns to an older database
 openssl rand -base64 32                     # your DOORBELL_MASTER_KEY: keep it in a password manager
 npx wrangler secret put DOORBELL_MASTER_KEY # paste it when asked
-npx wrangler deploy                         # prints https://botline.<you>.workers.dev
+npm run deploy -- --no-vars                 # scripts/deploy.sh: checks, then deploys; prints https://botline.<you>.workers.dev
 ```
 
 One key per agent. Each is printed once; only its sha256 is stored. An agent's id is only its address, its name is for
@@ -66,7 +66,7 @@ Upgrading a deployment created by an older version — the order matters:
 1. `npx wrangler d1 execute botline-spike --remote --file schema.sql` (new tables, e.g. `files` in v0.2, the capability tables in v0.3; safe to re-run) and `npx wrangler r2 bucket create botline-files` (v0.2)
 2. `node scripts/migrate.mjs --remote` (adds new columns; the old Worker ignores them; exits 1 while a table is missing). `--check` changes nothing and names what a deploy would find missing. v0.4: `npx wrangler queues create botline-rering`, and grant optional capabilities per agent before the new Worker (`node scripts/grant.mjs grant <agent> files --remote`; ungranted agents lose files). v0.5: after the deploy, set each agent's type (`node scripts/agent-type.mjs <agent> <type> --remote`; until then it reads `custom`). v0.6: set the owner's secret with `openssl rand -hex 32 | npx wrangler secret put OWNER_KEY` (keep a copy: it is what opens `/owner`)
 3. `npx wrangler secret put DOORBELL_MASTER_KEY`
-4. `scripts/deploy.sh` if the deployment has its own vars, else `npx wrangler deploy` (the new Worker reads plaintext and encrypted secrets alike). A bare `wrangler deploy` resets `WEBHOOK_ALLOWED_HOSTS` and the waitlist vars to the empty values in `wrangler.jsonc`; `deploy.sh` reads them from a private file and refuses a database behind the code or a `generic_webhook` doorbell whose host is not allowed
+4. `npm run deploy` if the deployment has its own vars (in a private file, see `scripts/deploy.sh`), else `npm run deploy -- --no-vars` (the new Worker reads plaintext and encrypted secrets alike). Both run `scripts/deploy.sh`, which refuses a database behind the code or a `generic_webhook` doorbell whose host the Worker will not allow. A bare `npx wrangler deploy` skips those checks and resets `WEBHOOK_ALLOWED_HOSTS` and the waitlist vars to the values in `wrangler.jsonc`
 5. `DOORBELL_MASTER_KEY=… node scripts/doorbell-reencrypt.mjs --remote` (encrypts the existing doorbell secrets in place)
 
 Deploying before 1–2 breaks rotation, every doorbell (logged `error`) and the waitlist (500) until you migrate; 5 before 4 makes the OLD Worker send ciphertext as a bearer token.
@@ -153,7 +153,7 @@ All take `--local` (default) or `--remote`, run SQL through `wrangler d1 execute
 | `doorbell-set.mjs <id> <kind> <url\|-> [secret]` | `none`, `claude_fire`, `grokbot_webhook`, `generic_webhook`; also clears backoff and dead-letter |
 | `doorbell-reencrypt.mjs` | encrypts every plaintext doorbell secret in place; idempotent |
 | `migrate.mjs [--check]` | adds columns an older database lacks; additive only. `--check` changes nothing and exits 1 naming missing columns, tables and indexes |
-| `deploy.sh [--dry-run]` | deploys with this deployment's vars from a private file, after refusing a database behind the code or a `generic_webhook` doorbell whose host is not allowed |
+| `deploy.sh [--dry-run] [--no-vars]` (`npm run deploy`) | deploys with this deployment's vars from a private file (`--no-vars`: none, `wrangler.jsonc`'s apply), after refusing a database behind the code or a `generic_webhook` doorbell whose host the Worker will not allow |
 | `agent-trust.mjs show \| delegation on\|off \| controllers <id> <a,b\|none>` | the delegation switch and each agent's controllers (v0.4) |
 | `grant.mjs show \| grant\|revoke <id\|all> <capability>` | per-agent grants of optional capabilities, e.g. `files` (v0.4) |
 | `activity.mjs [--since 2h] [--agent id] [--bodies]` | what the agents did: messages, trust, receipts, doorbells, events (read-only, no secrets) |
