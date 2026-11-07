@@ -396,55 +396,63 @@ export async function inbox(env: Env, a: AgentRow, opts: { unread: boolean; sinc
     since = d.toISOString();
   }
   // Everything that can fail runs BEFORE anything is claimed (a failure is a 500 that leaves unread mail unread): the
-  // server block and the delegation switch; the agent's controllers come with the authenticated row.
+  // server block, the delegation switch, and (in build) the message rows, their attachments and every response object.
+  // The claim is the last statement, and after it only a filter and the `claimed` flag (v0.6.1 T1). What remains is the
+  // response itself: if it is lost, or the claim commits and its reply is lost, the mail is read but unseen (the delivery
+  // contract in the README's inbox row; botline never re-sends a claimed message).
   const server = await serverBlock(env, a, opts.surface);
   const deleg = await delegationOn(env, ws);
   const mine = `FROM receipts r JOIN messages m ON m.id = r.message_id WHERE r.workspace_id = ?1 AND r.agent = ?2
     AND (m.expires_at IS NULL OR m.expires_at > ?3) AND (?4 IS NULL OR m.created_at > ?4)`;
-  let rcs: (Record<string, unknown> & { message_id: string })[];
-  let claimed = new Set<string>();
-  if (opts.peek) {
-    // v0.4 peek: unread mail, oldest first, without claiming it and without touching the ring lease (P6).
-    rcs = (await env.DB.prepare(`SELECT r.* ${mine} AND r.read_at IS NULL ORDER BY m.created_at, m.id LIMIT 100`)
-      .bind(ws, a.id, t, since).all<Record<string, unknown> & { message_id: string }>()).results;
-  } else {
-    // Clear the ring lease FIRST: anything that lands after this point rings again, and anything that
-    // coalesced against the old lease was inserted earlier and is claimed below. No lost wake-up.
-    // Only an in-flight lease is cleared: a backoff or busy lease (in_flight_since NULL) is about the doorbell, not the
-    // inbox, and a poll does not prove the doorbell works again.
-    await env.DB.prepare("UPDATE rings SET in_flight_since = NULL, lease_until = NULL WHERE workspace_id = ? AND agent = ? AND in_flight_since IS NOT NULL")
-      .bind(ws, a.id).run();
-    if (opts.unread) {
-      // Atomic claim: concurrent polls never both receive the same unread message. Oldest 100 first. RETURNING * carries
-      // each receipt's trust_at_send (absent before migrate.mjs) without another query after the claim.
-      rcs = (await env.DB.prepare(
-        `UPDATE receipts SET read_at = ?3 WHERE workspace_id = ?1 AND agent = ?2 AND read_at IS NULL
-         AND message_id IN (SELECT r.message_id ${mine} AND r.read_at IS NULL ORDER BY m.created_at, m.id LIMIT 100)
-         RETURNING *`,
-      ).bind(ws, a.id, t, since).all<Record<string, unknown> & { message_id: string }>()).results;
-      claimed = new Set(rcs.map((x) => x.message_id));
-    } else {
-      // All mail (read or not): the most recent 100, returned oldest first. Unread ones are marked read (claimed now).
-      rcs = (await env.DB.prepare(`SELECT r.* ${mine} ORDER BY m.created_at DESC, m.id DESC LIMIT 100`)
-        .bind(ws, a.id, t, since).all<Record<string, unknown> & { message_id: string }>()).results;
-      const r = await env.DB.prepare(
-        `UPDATE receipts SET read_at = ?3 WHERE workspace_id = ?1 AND agent = ?2 AND read_at IS NULL
-         AND message_id IN (SELECT value FROM json_each(?4)) RETURNING message_id`,
-      ).bind(ws, a.id, t, JSON.stringify(rcs.map((x) => x.message_id))).all<{ message_id: string }>();
-      claimed = new Set(r.results.map((x) => x.message_id));
-    }
-  }
-  const byId = new Map(rcs.map((x) => [x.message_id, x as Rc]));
-  const rows = rcs.length
-    ? (await env.DB.prepare("SELECT * FROM messages WHERE workspace_id = ? AND id IN (SELECT value FROM json_each(?)) ORDER BY created_at, id")
-        .bind(ws, JSON.stringify(rcs.map((x) => x.message_id))).all<MessageRow>()).results
-    : [];
-  const messages = await withAttachments(env, ws, rows.map(toMessage));
-  return {
-    notice: NOTICE, count: rows.length,
-    messages: messages.map((m) => view(m, trustFor(a, m.from, byId.get(m.id), deleg), claimed.has(m.id))),
-    server,
+  type Rx = Record<string, unknown> & { message_id: string; read_at?: string | null };
+  const unreadOldest = (limit: number) => env.DB.prepare(`SELECT r.* ${mine} AND r.read_at IS NULL ORDER BY m.created_at, m.id LIMIT ?5`)
+    .bind(ws, a.id, t, since, limit).all<Rx>().then((r) => r.results);
+  /** The response for these receipts, oldest first, as unclaimed. The trust each receipt was stamped with (trust_at_send,
+   *  absent before migrate.mjs) comes from the candidate read, so nothing is read after the claim. */
+  const build = async (rcs: Rx[]) => {
+    if (!rcs.length) return [];
+    const byId = new Map(rcs.map((x) => [x.message_id, x as Rc]));
+    const rows = (await env.DB.prepare("SELECT * FROM messages WHERE workspace_id = ? AND id IN (SELECT value FROM json_each(?)) ORDER BY created_at, id")
+      .bind(ws, JSON.stringify(rcs.map((x) => x.message_id))).all<MessageRow>()).results;
+    return (await withAttachments(env, ws, rows.map(toMessage))).map((m) => view(m, trustFor(a, m.from, byId.get(m.id), deleg), false));
   };
+  /** Claim: only these ids, only while still unread. Concurrent polls never both win one (claimed: true once per recipient);
+   *  a candidate another poll or an ack took in between is simply not won. No statement for no ids. */
+  const claim = async (ids: string[]) => new Set(ids.length ? (await env.DB.prepare(
+    `UPDATE receipts SET read_at = ?3 WHERE workspace_id = ?1 AND agent = ?2 AND read_at IS NULL
+     AND message_id IN (SELECT value FROM json_each(?4)) RETURNING message_id`,
+  ).bind(ws, a.id, t, JSON.stringify(ids)).all<{ message_id: string }>()).results.map((x) => x.message_id) : []);
+  const reply = (messages: ReturnType<typeof view>[]) => ({ notice: NOTICE, count: messages.length, messages, server });
+
+  // v0.4 peek: unread mail, oldest first, without claiming it and without touching the ring lease (P6).
+  if (opts.peek) return reply(await build(await unreadOldest(100)));
+
+  // Clear the ring lease FIRST, before the candidates are read: anything that lands after this point rings again (within
+  // the doorbell's own rules: hop ceiling, no doorbell), and anything that coalesced against the old lease was inserted
+  // earlier and is a candidate below. No lost wake-up. Only an in-flight lease is cleared: a backoff or busy lease
+  // (in_flight_since NULL) is about the doorbell, not the inbox, and a poll does not prove the doorbell works again.
+  await env.DB.prepare("UPDATE rings SET in_flight_since = NULL, lease_until = NULL WHERE workspace_id = ? AND agent = ? AND in_flight_since IS NOT NULL")
+    .bind(ws, a.id).run();
+  if (opts.unread) {
+    // The oldest 100 unread. A candidate lost to a concurrent poll or an ack between the read and the claim is dropped;
+    // then one more round for the shortfall, so a poll that loses a race still returns what is waiting.
+    let out: ReturnType<typeof view>[] = [];
+    for (let round = 0; round < 2 && out.length < 100; round++) {
+      const rcs = await unreadOldest(100 - out.length);
+      const built = await build(rcs);
+      const won = await claim(rcs.map((x) => x.message_id));
+      out = out.concat(built.filter((m) => won.has(m.id)).map((m) => ({ ...m, claimed: true })));
+      if (won.size === rcs.length) break;
+    }
+    return reply(out.sort((x, y) => x.created_at.localeCompare(y.created_at) || x.id.localeCompare(y.id)));
+  }
+  // All mail (read or not): the most recent 100, returned oldest first. Unread ones are marked read (claimed now); a row
+  // another poll claimed in between is still returned, with claimed: false.
+  const rcs = (await env.DB.prepare(`SELECT r.* ${mine} ORDER BY m.created_at DESC, m.id DESC LIMIT 100`)
+    .bind(ws, a.id, t, since).all<Rx>()).results;
+  const built = await build(rcs);
+  const won = await claim(rcs.filter((x) => x.read_at == null).map((x) => x.message_id));
+  return reply(built.map((m) => (won.has(m.id) ? { ...m, claimed: true } : m)));
 }
 
 export async function ack(env: Env, a: AgentRow, input: Args) {

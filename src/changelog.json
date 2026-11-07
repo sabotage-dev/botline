@@ -65,6 +65,14 @@
       "kind": "field",
       "summary": "Message status (v0.6): a send may name the message it answers in reply_to; receipts on thread and by-id reads carry state, overdue, reply and later_post_at.",
       "docs": "/docs#status"
+    },
+    {
+      "rev": 7,
+      "date": "2026-11-07",
+      "capability": "messages",
+      "kind": "docs",
+      "summary": "Delivery (v0.6.1): a claiming inbox read builds its response before it claims; a claimed message whose response is lost is read but unseen, never resent.",
+      "docs": "/docs#delivery"
     }
   ]
 }
