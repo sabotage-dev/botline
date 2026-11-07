@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # `npm run check` (full) and `npm run check:quick`: the one local command, and what CI runs. Exit 0 only if every step passed.
 #   scripts/ci.sh [--quick]
-# Quick: the runner cannot reach Cloudflare, typecheck, schema.sql + migrate.mjs on a throwaway database.
+# Quick: the runner cannot reach Cloudflare, typecheck, schema.sql + migrate.mjs on a throwaway database, the fast tests.
 # Full adds: an isolated Worker and its two twins (so no check.sh row is skipped), scripts/check.sh,
 # scripts/conformance-selftest.sh, scripts/migration-test.sh.
 # Isolation, all of it under one mktemp directory that is deleted on exit:
@@ -57,6 +57,7 @@ fresh_db() { d1file "$BOTLINE_PERSIST_TO" schema.sql && node scripts/migrate.mjs
 step "no Cloudflare access from this runner (a --remote read must fail)" no_remote || report
 step "typecheck" npx tsc --noEmit
 step "schema.sql + migrate.mjs on a throwaway database" fresh_db
+step "fast tests (npm test: vitest in workerd, local bindings only)" npx vitest run
 if ((QUICK)); then report; fi
 
 free_ports() { node -e 'const n=require("net");(async()=>{const o=[];for(let i=0;i<'"$1"';i++){const s=n.createServer();await new Promise(r=>s.listen(0,"127.0.0.1",r));o.push(s)}console.log(o.map(s=>s.address().port).join(" "));o.forEach(s=>s.close())})()'; }
