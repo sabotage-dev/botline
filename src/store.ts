@@ -52,7 +52,7 @@ export class ApiError extends Error {
   }
 }
 
-export const VERSION = "0.6.0-pre";
+export const VERSION = "0.6.1-pre";
 export type Args = Record<string, unknown>;
 // v0.4 (docs/plan-delegation-v0.4.md P9): one neutral text for every workspace. Where delegation is off, trust is never
 // "controller", so every body stays data, as before.
